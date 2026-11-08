@@ -1,7 +1,8 @@
 /*
  * SNES prep (main thread): build the per-song "SPC RAM image" from GeneralUser GS.
  *
- * Like a game's sound programmer, it picks the instruments the song uses, keeps one to three
+ * Like a game's sound programmer, it takes the instruments in use (table indices `used`; without them,
+ * the presets the song's GM programs/drums map to), keeps one to three
  * samples per instrument (sparse key splits), resamples them, cuts attacks, replaces long loops with
  * a few pitch periods aligned to 16-sample BRR blocks, folds the discarded natural decay into the
  * hardware ADSR, BRR-encodes them and fits all of it into the 64 KB audio RAM:
@@ -13,7 +14,8 @@
  * loops, fewer key splits, and finally a shorter echo buffer. That per-song squeeze is the sound.
  */
 import { parseSF2, toWorkletBank } from '../sf2.js';
-import { brrEncode } from './snes-brr.js';
+import { brrEncode, brrDecode } from './snes-brr.js';
+import { PRESETS, gmPreset, gmDrum } from './snes-presets.js';
 import { RATE_PERIOD } from './snes-dsp.js';
 
 const DIR_ADDR = 0x1C00, SAMPLE_BASE = 0x2000;
@@ -40,14 +42,7 @@ const STAGES = [
   { K: 1, edl: 3, maxL: 9 }, { K: 1, edl: 2, maxL: 10 }, { K: 1, edl: 1, maxL: LMAX }, { K: 1, edl: 0, maxL: LMAX },
 ];
 
-// GM programs prepared for live play (no song): one or two per family; the rest fall back by family.
-const LIVE_SET = [0, 2, 4, 6, 8, 11, 12, 16, 19, 21, 24, 25, 27, 29, 30, 32, 33, 35, 38, 40, 42, 45, 46, 47, 48, 50,
-  52, 55, 56, 57, 60, 61, 62, 65, 66, 68, 71, 73, 75, 78, 80, 81, 84, 87, 88, 89, 91, 95, 98, 100, 104, 105, 108, 114, 115, 117, 118, 122, 127];
-// key-split centre per family (piano, chromatic, organ, guitar, bass, strings, ensemble, brass,
-// reed, pipe, lead, pad, fx, ethnic, percussive, sfx)
-const FAM_CENTER = [60, 72, 60, 57, 40, 62, 62, 60, 64, 74, 67, 60, 64, 64, 60, 60];
 
-const maxAtt = (P) => (P.loop ? 10 : 0.3 * P.shot / P.rate);
 const loopTime = (P) => (P.loop ? (P.pad + P.att) / P.rate : 0);
 const tc2s = (tc) => (tc <= -12000 ? 0 : Math.pow(2, tc / 1200));
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -63,16 +58,8 @@ const expRate = (dbps) => {                                    // rate index giv
 };
 const attackTime = (ar) => (ar === 15 ? 2 / 32000 : 64 * RATE_PERIOD[2 * ar + 1] / 32000);
 
-/**
- * SF2 volume envelope → ADSR1, ADSR2, release GAIN. The natural decay of a truncated sample (dB/s)
- * is folded into a second ADSR2 that the driver writes at the moment playback reaches the loop
- * (swTicks, 60 Hz frames) — before that point the sample itself still carries its own decay.
- */
-function mapEnvelope(g, natural, loopTime, maxAttack) {
-  const a = mapEnv1(g, 0, maxAttack), b = natural > 0.2 ? mapEnv1(g, natural, maxAttack) : a;
-  return { adsr1: a.adsr1, adsr2: a.adsr2, rel: a.rel, adsr2b: b.adsr2, swTicks: b.adsr2 !== a.adsr2 ? Math.max(1, Math.round(loopTime * 60)) : 0 };
-}
-function mapEnv1(g, natural, maxAttack = 10) {
+/** SF2 volume envelope (+ natural decay, dB/s) → ADSR1, ADSR2, release GAIN (used to derive the preset defaults). */
+export function mapEnv1(g, natural, maxAttack = 10) {
   const A = Math.min(tc2s(g[34]), maxAttack);
   let ar = 15;
   if (A > 0.004) { let be = Infinity; for (let a = 0; a < 16; a++) { const e = Math.abs(Math.log(attackTime(a) / A)); if (e < be) { be = e; ar = a; } } }
@@ -98,7 +85,7 @@ function mapEnv1(g, natural, maxAttack = 10) {
 }
 
 // ---------------------------------------------------------------- zone choice
-function pickZone(zones, key, vel = 100) {
+export function pickZone(zones, key, vel = 100) {
   if (!zones || !zones.length) return null;
   let c = zones.filter(z => z.kl <= key && key <= z.kh && z.vl <= vel && vel <= z.vh);
   if (!c.length) c = zones.filter(z => z.kl <= key && key <= z.kh);
@@ -167,10 +154,12 @@ function decayRate(s, iFrom, iTo) {
 
 // ---------------------------------------------------------------- layout planning (cheap, no audio)
 function plan(s, L) {
-  const [rateL, attT, loopT, shot0] = LEVELS[L];
-  const shotT = s.drum ? Math.max(shot0, 0.12) : shot0;     // short percussion keeps its body
+  const [rateL, attT, loop0, shot0] = LEVELS[L];
+  // per-instrument budget hints cap the ladder (max rate, max loop, max one-shot length)
+  const loopT = Math.min(loop0, s.capLoop);
+  const shotT = Math.min(s.drum ? Math.max(shot0, 0.12) : shot0, s.capLen);   // short percussion keeps its body
   const sr = s.sr;
-  const rate0 = Math.max(2000, Math.min(Math.max(rateL, (s.bright || 0) * (1 - 0.5 * L / LMAX)), 32000, s.rateCap, sr));
+  const rate0 = Math.max(2000, Math.min(Math.max(rateL, (s.bright || 0) * (1 - 0.5 * L / LMAX)), 32000, s.rateCap, s.capRate, sr));
   const P = { L, rate: rate0, pad: 0, att: 0, loop: 0, shot: 0, mode: 'shot', srcLoop: 0, unit: 0, q: 0, natural: 0, fade: 0 };
   const chooseLoop = (unit, target, origUnit) => {
     let best = null, bs = Infinity;
@@ -320,80 +309,94 @@ function renderSample(s, P, pool) {
 }
 
 // ---------------------------------------------------------------- main
-export async function prepare({ fetchSF2, song }) {
+let SF = null;                         // parsed GeneralUser GS, kept across preps (the app re-preps often)
+let CACHE = { key: null, data: null };
+/** Last prep, for the editor: per instrument name → squeezed sample info + decoded BRR preview. */
+export const prepView = { byName: {}, info: null, seq: 0 };
+export const prepEvents = typeof EventTarget !== 'undefined' ? new EventTarget() : null;
+
+const sampleParams = (x) => x && [x.src && x.src.bank, x.src && x.src.prog, x.src && x.src.key, x.src && x.src.vel, x.splits, !!x.fixed, x.rate, x.loop, x.len, !!x.noise];
+
+function defaultUsed(table, song) {
+  const used = new Set();
+  if (!song) { table.forEach((_, i) => used.add(i)); return [...used]; }
+  for (const p of song.programs || []) { const i = gmPreset(p); if (i >= 0) used.add(i); }
+  if (song.drums) for (let n = 27; n <= 87; n++) { const i = gmDrum(n); if (i >= 0) used.add(i); }
+  return [...used];
+}
+const cloneData = (d) => ({ ...d, ram: d.ram.slice() });
+
+export async function prepare({ fetchSF2, song, instruments, used }) {
   const t0 = Date.now();
-  const sf = toWorkletBank(parseSF2(await fetchSF2()));
-  const pool = sf.pool;
-  const wanted = song ? [...new Set(song.programs || [])].filter(p => p >= 0 && p < 128).sort((a, b) => a - b) : LIVE_SET;
-  const wantDrums = song ? !!song.drums : true;
+  const table = instruments && instruments.length ? instruments : PRESETS;
+  let use = (used && used.length ? used : defaultUsed(table, song)).filter(i => i >= 0 && i < table.length && table[i]);
+  use = [...new Set(use)].sort((a, b) => a - b);
+  const key = JSON.stringify(use.map(i => [i, sampleParams(table[i])]));
+  if (CACHE.key === key) return cloneData(CACHE.data);    // only voice params changed: same RAM image
+  if (!SF) SF = toWorkletBank(parseSF2(await fetchSF2()));
+  const sf = SF, pool = sf.pool;
   const kit = sf.presets[128 * 128] || [];
-  const nProg = wanted.length;
-  const Kmax = nProg <= 6 ? 3 : nProg <= 14 ? 2 : 1;
+  const nMel = use.filter(i => !table[i].noise && table[i].src.bank < 128 && !table[i].fixed).length;
+  const Kmax = nMel <= 6 ? 3 : nMel <= 14 ? 2 : 1;
 
   const sampleMap = new Map();
   const getSample = (z, drum, kind) => {
     const fcC = effectiveFc(z);
     const fc = fcC < 13400 ? Math.max(400, 8.176 * Math.pow(2, fcC / 1200)) : 0;
     const looped = (z.g[54] & 1) === 1 && z.le > z.ls + 8 && z.ls >= z.start && z.le <= z.end;
-    const key = `${z.start}:${z.end}:${looped ? z.ls + ':' + z.le : '-'}:${Math.round(fc)}`;
-    let s = sampleMap.get(key);
+    const k = `${z.start}:${z.end}:${looped ? z.ls + ':' + z.le : '-'}:${Math.round(fc)}`;
+    let s = sampleMap.get(k);
     if (!s) {
       const f0 = 440 * Math.pow(2, (z.root + z.corr / 100 - 69) / 12);
-      s = { key, start: z.start, end: z.end, ls: z.ls, le: z.le, sr: z.sr, looped, f0: clamp(f0, 20, 8000), fc, fq: Math.max(0.707, Math.pow(10, z.g[9] / 200)),
-        drum, pitched: !drum, tailLoop: false, rateCap: 32000, lvl: 0 };
+      s = { key: k, start: z.start, end: z.end, ls: z.ls, le: z.le, sr: z.sr, looped, f0: clamp(f0, 20, 8000), fc, fq: Math.max(0.707, Math.pow(10, z.g[9] / 200)),
+        drum, pitched: !drum, tailLoop: false, rateCap: 32000, capRate: 32000, capLoop: 1, capLen: 10, lvl: 0, users: [] };
       analyse(s, pool);
       s.tailLoop = !looped && s.peakFrac < 0.3 && (!drum || /crash|ride|hatOpen|bell|triangle|cowbell/.test(kind || ''));
-      sampleMap.set(key, s);
+      sampleMap.set(k, s);
     }
     return s;
   };
+  // SF2 pitch (cents relative to the source rate) of a zone played at note n
+  const centsOf = (z, n) => (n - z.root) * z.g[56] + z.g[51] * 100 + z.g[52] - z.corr;
 
-  // build instruments for K splits; returns { progs, drums, samples }
-  const build = (K) => {
-    sampleMap.forEach(s => { s.rateCap = 32000; s.used = false; });
-    const progs = new Array(128).fill(null), drums = new Array(128).fill(null);
-    for (const p of wanted) {
-      const zones = sf.presets[p] || sf.presets[0];
-      const c = FAM_CENTER[p >> 3];
-      const centers = K === 1 ? [c] : K === 2 ? [c - 9, c + 12] : [c - 16, c, c + 16];
-      const splits = [];
+  const build = (Kst) => {
+    sampleMap.forEach(s => { s.rateCap = 32000; s.capRate = 32000; s.capLoop = 1; s.capLen = 10; s.used = false; });
+    const insts = new Array(table.length).fill(null);
+    for (const idx of use) {
+      const ins = table[idx], src = ins.src || { bank: 0, prog: 0, key: 60, vel: 100 };
+      if (ins.noise) { insts[idx] = { noise: true, splits: [] }; continue; }
+      const drumBank = src.bank >= 128;
+      const zones = drumBank ? kit.filter(z => z.kl <= src.key && src.key <= z.kh) : (sf.presets[src.prog & 127] || sf.presets[0]);
+      const key = clamp(src.key | 0, 0, 127), vel = clamp(src.vel || 100, 1, 127);
+      const K = ins.fixed || drumBank ? 1 : clamp(Math.min(ins.splits || 1, Kst, Kmax), 1, 3);
+      const centers = K === 1 ? [key] : K === 2 ? [key - 9, key + 12] : [key - 16, key, key + 16];
+      const sp = [];
       for (const ce of centers) {
-        const z = pickZone(zones, ce); if (!z) continue;
-        if (splits.length && splits[splits.length - 1].z === z) continue;
-        splits.push({ z, ce });
+        const z = pickZone(zones.length ? zones : kit, ce, vel); if (!z) continue;
+        if (sp.length && sp[sp.length - 1].z === z) continue;
+        sp.push({ z, ce });
       }
-      progs[p] = splits.map((sp, i) => {
-        const hi = i === splits.length - 1 ? 127 : Math.floor((sp.ce + splits[i + 1].ce) / 2);
-        const s = getSample(sp.z, false); s.used = true;
-        const root = zoneRoot(sp.z);
-        const up = Math.min(Math.max(0, Math.min(hi, 108) - root), 30);
-        s.rateCap = Math.min(s.rateCap, Math.max(4000, 128000 / Math.pow(2, up / 12)));
-        return { z: sp.z, s, hi, root, scale: sp.z.g[56] / 100 };
-      });
-    }
-    if (wantDrums) {
-      for (let n = 35; n <= 81; n++) {
-        const z = pickZone(kit.filter(zz => zz.kl <= n && n <= zz.kh), n);
-        if (!z) continue;
-        const kind = drumKindName(n);
-        const s = getSample(z, true, kind); s.used = true;
-        const cents = (n - z.root) * z.g[56] + z.g[51] * 100 + z.g[52] - z.corr;
-        const ratio = Math.pow(2, cents / 1200);              // playback ratio relative to the source rate
-        s.rateCap = Math.min(s.rateCap, Math.max(4000, 0x3FFF * 32000 / 4096 / ratio));
-        drums[n] = { z, s, ratio };
-      }
+      insts[idx] = { splits: sp.map((x, i) => {
+        const hi = i === sp.length - 1 ? 127 : Math.floor((x.ce + sp[i + 1].ce) / 2);
+        const s = getSample(x.z, drumBank, drumKindName(key)); s.used = true; s.users.push(ins.name);
+        const top = ins.fixed ? key : Math.min(hi, 108, Math.round(zoneRoot(x.z)) + 30);
+        s.rateCap = Math.min(s.rateCap, Math.max(4000, 128000 / Math.pow(2, centsOf(x.z, top) / 1200)));
+        s.capRate = Math.min(s.capRate, clamp(ins.rate || 32000, 2000, 32000));
+        s.capLoop = Math.min(s.capLoop, clamp((ins.loop || 50) / 1000, 0.0005, 1));
+        s.capLen = Math.min(s.capLen, clamp((ins.len || 800) / 1000, 0.02, 10));
+        return { z: x.z, s, hi };
+      }) };
     }
     const samples = [...sampleMap.values()].filter(s => s.used);
-    return { progs, drums, samples };
+    return { insts, samples };
   };
 
   // ---- squeeze until it fits ----
   let chosen = null;
   for (const st of STAGES) {
-    const K = Math.min(st.K, Kmax);
-    const b = build(K);
-    if (b.samples.length > MAX_SAMPLES) continue;
-    const budget = (st.edl ? 0x10000 - st.edl * 0x800 : 0xFF00) - SAMPLE_BASE;
+    const b = build(st.K);
+    if (b.samples.length > MAX_SAMPLES - 1) continue;
+    const budget = (st.edl ? 0x10000 - st.edl * 0x800 : 0xFF00) - SAMPLE_BASE - 9;
     for (const s of b.samples) { s.lvl = 0; s.P = plan(s, 0); }
     let total = b.samples.reduce((a, s) => a + s.P.blocks * 9, 0);
     while (total > budget) {
@@ -402,7 +405,7 @@ export async function prepare({ fetchSF2, song }) {
       if (!big) break;
       total -= big.P.blocks * 9; big.lvl++; big.P = plan(big, big.lvl); total += big.P.blocks * 9;
     }
-    chosen = { ...b, st, K, budget, total };
+    chosen = { ...b, st, budget, total };
     if (total <= budget) break;
   }
 
@@ -410,56 +413,48 @@ export async function prepare({ fetchSF2, song }) {
   const ram = new Uint8Array(0x10000);
   const sig = 'RetroSynths SNES sound driver (GM) - RAM image built from GeneralUser GS';
   for (let i = 0; i < sig.length; i++) ram[0x200 + i] = sig.charCodeAt(i);
-  const { progs, drums, samples, st } = chosen;
+  const { insts, samples, st } = chosen;
   const edl = st.edl, esa = edl ? (0x10000 - edl * 0x800) >> 8 : 0xFF;
-  let addr = SAMPLE_BASE;
+  // srcn 0: one silent looping block (noise instruments still need a running BRR stream)
+  ram[SAMPLE_BASE] = 0x03;
+  ram[DIR_ADDR] = SAMPLE_BASE & 0xFF; ram[DIR_ADDR + 1] = SAMPLE_BASE >> 8; ram[DIR_ADDR + 2] = SAMPLE_BASE & 0xFF; ram[DIR_ADDR + 3] = SAMPLE_BASE >> 8;
+  let addr = SAMPLE_BASE + 9;
+  const view = {};
   samples.forEach((s, i) => {
     const r = renderSample(s, s.P, pool);
     const brr = brrEncode(r.pcm, r.loopBlock);
-    if (addr + brr.length > esa << 8) { s.srcn = -1; return; }   // (should not happen: budget checked)
+    if (addr + brr.length > esa << 8) { s.srcn = -1; return; }
     ram.set(brr, addr);
-    const loopAddr = r.loopBlock >= 0 ? addr + r.loopBlock * 9 : addr;
-    const d = DIR_ADDR + i * 4;
+    const n = i + 1, loopAddr = r.loopBlock >= 0 ? addr + r.loopBlock * 9 : addr;
+    const d = DIR_ADDR + n * 4;
     ram[d] = addr & 0xFF; ram[d + 1] = addr >> 8; ram[d + 2] = loopAddr & 0xFF; ram[d + 3] = loopAddr >> 8;
-    s.srcn = i; s.addr = addr; s.bytes = brr.length; s.gain = r.gain;
+    s.srcn = n; s.addr = addr; s.bytes = brr.length; s.gain = r.gain;
+    s.view = { rate: Math.round(s.P.rate), samples: s.P.total, bytes: brr.length, addr, loopStart: s.P.loop ? s.P.pad + s.P.att : -1, loopLen: s.P.loop,
+      level: s.lvl, levels: LMAX, mode: s.P.mode, pcm: brrDecode(brr), shared: s.users.length };
     addr += brr.length;
   });
   const atten = (z) => Math.pow(10, -0.4 * z.g[48] / 200);
-  const programs = new Array(128).fill(null);
-  for (let p = 0; p < 128; p++) {
-    if (!progs[p]) continue;
-    const splits = progs[p].filter(sp => sp.s.srcn >= 0).map(sp => {
-      const env = mapEnvelope(sp.z.g, sp.s.P.natural, loopTime(sp.s.P), maxAtt(sp.s.P));
-      return { hi: sp.hi, srcn: sp.s.srcn, root: sp.root, scale: sp.scale, base: 4096 * sp.s.P.rate / 32000,
-        gain: sp.s.gain * atten(sp.z), ...env };
-    });
-    if (splits.length) programs[p] = { splits, own: true };
-  }
-  // fill every GM program: same family first, then the nearest prepared program
-  const have = programs.map((x, i) => (x ? i : -1)).filter(i => i >= 0);
-  if (have.length) for (let p = 0; p < 128; p++) {
-    if (programs[p]) continue;
-    let best = have[0], bd = Infinity;
-    for (const h of have) { const d = Math.abs(h - p) + ((h >> 3) === (p >> 3) ? 0 : 1000); if (d < bd) { bd = d; best = h; } }
-    programs[p] = { splits: programs[best].splits, own: false, from: best };
-  }
-  const drumMap = new Array(128).fill(null);
-  for (let n = 0; n < 128; n++) {
-    const d = drums[n]; if (!d || d.s.srcn < 0) continue;
-    const env = mapEnvelope(d.z.g, d.s.P.natural, loopTime(d.s.P), maxAtt(d.s.P));
-    drumMap[n] = { srcn: d.s.srcn, pitch: clamp(Math.round(4096 * d.s.P.rate / 32000 * d.ratio), 1, 0x3FFF),
-      gain: d.s.gain * atten(d.z), pan: clamp(d.z.g[17], -500, 500) / 500, excl: d.z.g[57], ...env };
-  }
-  const levels = samples.map(s => s.lvl);
-  return {
-    ram, dir: DIR_ADDR >> 8, esa, edl, programs, drums: drumMap,
-    info: {
-      samples: samples.length, bytes: addr - SAMPLE_BASE, budget: chosen.budget, splits: chosen.K, edl,
-      echoBytes: edl * 2048, minLevel: Math.min(...levels), maxLevel: Math.max(...levels),
-      meanRate: Math.round(samples.reduce((a, s) => a + s.P.rate, 0) / Math.max(1, samples.length)),
-      ms: Date.now() - t0,
-    },
+  const out = insts.map((I, idx) => {
+    if (!I) return null;
+    if (I.noise) return { noise: true, splits: [{ hi: 127, srcn: 0, zroot: 60, scale: 100, off: 0, base: 4096, gain: 0.6, natural: 0, loopT: 0 }] };
+    const splits = I.splits.filter(x => x.s.srcn >= 0).map(x => ({
+      hi: x.hi, srcn: x.s.srcn, zroot: x.z.root, scale: x.z.g[56], off: x.z.g[51] * 100 + x.z.g[52] - x.z.corr,
+      base: 4096 * x.s.P.rate / 32000, gain: x.s.gain * atten(x.z), natural: x.s.P.natural, loopT: loopTime(x.s.P),
+    }));
+    view[table[idx].name] = { splits: I.splits.map(x => ({ hi: x.hi, ...(x.s.view || {}) })) };
+    return splits.length ? { splits } : null;
+  });
+  const info = {
+    samples: samples.length, bytes: addr - SAMPLE_BASE, budget: chosen.budget, edl, echoBytes: edl * 2048, instruments: use.length,
+    meanRate: Math.round(samples.reduce((a, s) => a + s.P.rate, 0) / Math.max(1, samples.length)),
+    maxLevel: Math.max(0, ...samples.map(s => s.lvl)), ms: Date.now() - t0,
   };
+  for (const i of use) if (table[i].noise) view[table[i].name] = { noise: true };
+  prepView.byName = view; prepView.info = info; prepView.seq++;
+  if (prepEvents) try { prepEvents.dispatchEvent(new Event('prep')); } catch {}
+  const data = { key, ram, dir: DIR_ADDR >> 8, esa, edl, insts: out, info };
+  CACHE = { key, data: cloneData(data) };
+  return data;
 }
 export const transfer = (data) => (data && data.ram ? [data.ram.buffer] : []);
 
