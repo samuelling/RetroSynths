@@ -16,8 +16,8 @@
 // priority (melody > bass > chords); chords as fast arpeggios at the driver rate (60 or 120 Hz); drums
 // as blips (pitch sweeps and noise bursts) that interrupt the tone for a few milliseconds.
 
-import { midiHz, gmLevel, drumKind, TOM_NOTE } from './util.js';
-import { patchFor, LogEnv } from './ay-patches.js';
+import { midiHz, gmLevel } from './util.js';
+import { noteStart, noteTick, noteRelease, noteVol, notePitch, macroVal, normInst } from './ay-driver.js';
 import { Blep, Biquad } from './beeper-dsp.js';
 
 const OFF = 0, TONE = 1, NOISE = 2;
@@ -43,7 +43,7 @@ export class OneBit {
     switch (p.mode) {
       case TONE:
         if (this.level) {
-          if (p.k !== 1) { const P = Math.min(p.maxP, (p.hi + p.lo) * p.k), d = p.hi / (p.hi + p.lo); p.hi = Math.max(1, Math.round(P * d)); p.lo = Math.max(1, Math.round(P - p.hi)); }
+          if (p.k !== 1) { const P = Math.max(4, Math.min(p.maxP, (p.hi + p.lo) * p.k)), d = p.hi / (p.hi + p.lo); p.hi = Math.max(1, Math.round(P * d)); p.lo = Math.max(1, Math.round(P - p.hi)); }
           return p.hi;
         }
         return p.lo;
@@ -102,80 +102,74 @@ export class SpeakerModel {
   clear() { for (const b of this.f) b.clear(); }
 }
 
-// ---------------------------------------------------------------- 1-bit drums
-/** Drum blip as a OneBit program + duration (seconds). amp 0..1; pwm: loudness by pulse width. */
-function drumProgram(n, amp, clock, pwm) {
-  const us = clock * 1e-6, k = drumKind(n);
-  const width = pwm ? (6 + 34 * Math.sqrt(amp)) * us : 0;
-  const tone = (hz, dur, sweepK = 1, minHz = 20) => {
-    const P = clock / hz;
-    const hi = pwm ? Math.min(P / 2, width * 1.5) : P / 2;
-    return [{ mode: TONE, hi, lo: P - hi, k: sweepK, maxP: clock / minHz }, dur];
-  };
-  const noise = (g0, g1, dur) => [{ mode: NOISE, gmin: g0 * us, gmax: g1 * us, w: width }, dur];
-  switch (k) {
-    case 'kick': return tone(n === 35 ? 140 : 170, 0.075, 1.075, 38);
-    case 'snare': return noise(n === 40 ? 30 : 45, n === 40 ? 260 : 380, 0.085);
-    case 'stick': return tone(1650, 0.012);
-    case 'clap': return noise(35, 300, 0.055);
-    case 'hatClosed': return noise(14, 80, 0.016);
-    case 'hatPedal': return noise(14, 70, 0.012);
-    case 'hatOpen': return noise(14, 90, 0.09);
-    case 'crash': return noise(14, n === 52 ? 220 : 150, n === 55 ? 0.12 : 0.28);
-    case 'ride': return noise(12, 50, 0.12);
-    case 'bell': return tone(1420, 0.14);
-    case 'tom': { const t = TOM_NOTE[n] || 50; return tone(midiHz(t + 12), 0.1, 1.022, 30); }
-    case 'conga': { const t = TOM_NOTE[n] || 64; return tone(midiHz(t + 7), n === 62 ? 0.03 : 0.055, 1.008, 60); }
-    case 'cowbell': return tone(n === 56 ? 800 : n === 67 ? 1000 : 760, 0.06);
-    case 'shaker': return noise(12, 70, n === 54 ? 0.05 : 0.03);
-    case 'block': return tone(n === 75 ? 2500 : n === 76 ? 1250 : 950, 0.025);
-    case 'triangle': return tone(4450, n === 80 ? 0.03 : 0.25);
-    default:
-      switch (n) {
-        case 58: return noise(60, 900, 0.2);                  // vibraslap
-        case 71: return tone(2350, 0.08);
-        case 72: return tone(2350, 0.25);
-        case 73: return noise(150, 700, 0.05);
-        case 74: return noise(150, 700, 0.16);
-        case 78: return tone(420, 0.05, 0.996, 300);
-        case 79: return tone(650, 0.1, 1.004, 250);
-        default: return tone(midiHz(n + 12), 0.04);
-      }
-  }
+// ---------------------------------------------------------------- drum blips
+/** OneBit program + duration (s) for a 'blip' instrument. amp 0..1; pwm: loudness by pulse width. */
+export function blipProgram(b, note, amp, clock, pwm) {
+  const us = clock * 1e-6, width = pwm ? (6 + 34 * Math.sqrt(amp)) * us : 0;
+  const hz = Math.max(20, b.rel ? b.hz * Math.pow(2, (note - 60) / 12) : b.hz);
+  const dur = (b.ms / 1000) * (pwm ? 1 : 0.55 + 0.45 * Math.sqrt(amp));
+  if (b.mode === 'noise') return [{ mode: NOISE, gmin: b.gapMin * us, gmax: Math.max(b.gapMin, b.gapMax) * us, w: width }, dur];
+  const P = clock / hz, hi = pwm ? Math.min(P / 2, width * 1.5) : P / 2;
+  return [{ mode: TONE, hi, lo: P - hi, k: b.mode === 'sweep' ? 1 + (b.sweep || 0) / 1000 : 1, maxP: clock / 20 }, dur];
 }
-const DRUM_PRIO = { kick: 9, snare: 8, clap: 7, tom: 7, crash: 6, stick: 5, conga: 5, cowbell: 5, bell: 4, ride: 4, block: 4, triangle: 3, perc: 3, hatOpen: 3, shaker: 2, hatClosed: 2, hatPedal: 1 };
 
 // ---------------------------------------------------------------- the music driver
-class Note {
-  constructor() { this.active = false; this.env = new LogEnv(); this.ch = 0; this.note = 0; this.vel = 0; this.on = false; this.sus = false; this.age = 0; this.frames = 0; this.amp = 0; this.patch = null; }
-}
-const CLASS = { lead: 3, bass: 2, chord: 1, pad: 1, perc: 1, fx: 1 };
-const tri = (ph) => { const x = ph - Math.floor(ph); return x < 0.25 ? 4 * x : x < 0.75 ? 2 - 4 * x : 4 * x - 4; };
+const CLASS = { lead: 3, bass: 2, chord: 1, pad: 1, perc: 1, fx: 1, drum: 1 };
+const AY_LEVEL = [0, 0.01, 0.0145, 0.021, 0.0307, 0.0455, 0.0645, 0.107, 0.127, 0.205, 0.292, 0.373, 0.493, 0.635, 0.806, 1];
 
 export class OneBitDriver {
   /**
-   * cfg: clock, timer 'pit' | 'cpu', quantum (cycles of the tone loop), gateOff, speaker 'pc' | 'apple',
-   *      frameHz, volume 'square' | 'pwm', mode 'priority' | 'multiplex', gain
+   * cfg: clock, timer 'pit' | 'cpu', quantum (cycles of the tone loop), gateOff, speaker 'pc' | 'apple', frameHz,
+   *      mode 'priority' | 'multiplex', gain, lib { presets, gmPreset, gmDrum }, ayPwm (AY instruments use pulse width)
    */
   constructor(host, cfg) {
     this.h = host; this.sr = host.sampleRate; this.cfg = { ...cfg };
     this.gen = new OneBit(this.sr, cfg.clock, cfg.gateOff);
     this.spk = new SpeakerModel(this.sr, cfg.speaker);
-    this.notes = Array.from({ length: 48 }, () => new Note());
+    this.notes = Array.from({ length: 48 }, () => ({ active: false }));
     this.byCh = Array.from({ length: 16 }, () => []);
-    this.pend = null;                 // pending drum hit for the next tick
+    this.pend = null; this.blipNow = null;
     this.age = 0; this.frame = 0; this.toTick = 0;
     this.tmp = new Float32Array(2048);
     this.gain = cfg.gain || 0.3;
     this.sounding = 0;
+    this.table = cfg.lib ? cfg.lib.presets.map(p => normInst({ ...p })) : [];
+    this.arr = Array.from({ length: 16 }, () => ({ inst: -1, voice: 'auto' }));
+    this.kit = {}; this.vmute = 0;
+    this.vs = new Float32Array(4); this.vstate = [0, -1, -1, -1];
     this.setRate(cfg.frameHz);
   }
   setRate(hz) { this.cfg.frameHz = hz; this.frameHz = hz; this.dt = 1 / hz; }
 
-  noteAmp(c, vel, patch) { return this.h.mute[c] ? 0 : Math.min(1, 1.6 * gmLevel(this.h.ch[c], vel) * patch.gain); }
+  // ------------------------------------------------------------ v2 interface
+  setInstruments(list) { this.table = list.map(p => normInst({ ...p })); for (const n of this.notes) if (n.active && this.table[n.idx]) n.inst = this.table[n.idx]; }
+  updateInstrument(i, inst) { this.table[i] = normInst({ ...inst }); for (const n of this.notes) if (n.active && n.idx === i) n.inst = this.table[i]; }
+  setArrangement(arr) { for (let c = 0; c < 16; c++) this.arr[c] = arr && arr[c] ? { inst: arr[c].inst, voice: arr[c].voice || 'auto' } : { inst: -1, voice: 'auto' }; }
+  setKit(kit) { this.kit = kit || {}; }
+  setVoiceMute(mask) { this.vmute = mask & 1; }
+  voiceState() { const v = this.vs, s = this.vstate; v[0] = s[0]; v[1] = s[1]; v[2] = s[2]; v[3] = s[3]; return v; }
+  resolve(c, note) {
+    const ch = this.h.ch[c], a = this.arr[c];
+    if (a.inst >= 0 && this.table[a.inst]) return a.inst;
+    if (ch.drum) { const k = this.kit[note]; return k != null && this.table[k] ? k : this.cfg.lib.gmDrum(note); }
+    return this.cfg.lib.gmPreset(ch.program);
+  }
+
+  // ------------------------------------------------------------ MIDI
+  noteAmp(c, vel) { return this.h.mute[c] ? 0 : Math.min(1, 1.6 * gmLevel(this.h.ch[c], vel)); }
   noteOn(c, note, vel) {
-    const ch = this.h.ch[c];
-    if (ch.drum) { this.drumOn(c, note, vel); return; }
+    const idx = this.resolve(c, note), inst = this.table[idx];
+    if (inst) this.playInst(inst, idx, c, note, vel);
+  }
+  /** play a given instrument (also used by the Apple II machine for its speaker instruments) */
+  playInst(inst, idx, c, note, vel) {
+    const amp = this.noteAmp(c, vel);
+    if (inst.type === 'blip') {
+      if (amp <= 0) return;
+      const pr = inst.prio || 3;
+      if (!this.pend || pr >= this.pend.pr) this.pend = { inst, idx, note, amp, pr, c };
+      return;
+    }
     let n = null;
     for (const x of this.notes) if (x.active && x.ch === c && x.note === note) { n = x; break; }
     if (!n) {
@@ -183,127 +177,107 @@ export class OneBitDriver {
       for (const x of this.notes) if (!x.active) { n = x; break; }
       if (!n) for (const x of this.notes) if (x.age < ba) { ba = x.age; n = x; }
     }
-    const patch = patchFor(ch.program);
-    n.active = true; n.ch = c; n.note = note; n.vel = vel; n.on = true; n.sus = false; n.age = ++this.age; n.frames = 0;
-    n.patch = patch; n.amp = this.noteAmp(c, vel, patch); n.env.start(patch);
-  }
-  drumOn(c, note, vel) {
-    const amp = this.h.mute[c] ? 0 : Math.min(1, 1.6 * gmLevel(this.h.ch[c], vel));
-    this.drumHit(note, amp, c);
-  }
-  /** queue a drum blip (also used by the Apple II Mockingboard machine for speaker drums) */
-  drumHit(note, amp, c = 9) {
-    if (amp <= 0 || note < 27 || note > 87) return;
-    const pr = DRUM_PRIO[drumKind(note)] || 3;
-    if (!this.pend || pr >= this.pend.pr) this.pend = { note, amp, pr, c };
+    Object.assign(n, { active: true, ch: c, note, vel, on: true, sus: false, age: ++this.age, cut: false, amp });
+    noteStart(n, inst, idx);
   }
   noteOff(c, note) {
     for (const n of this.notes) if (n.active && n.on && n.ch === c && n.note === note) {
       n.on = false;
-      if (this.h.ch[c].sustain) n.sus = true; else n.env.release();
+      if (this.h.ch[c].sustain) n.sus = true; else noteRelease(n);
     }
   }
-  sustainOff(c) { for (const n of this.notes) if (n.active && n.sus && n.ch === c) { n.sus = false; n.env.release(); } }
-  allOff(c, hard) { for (const n of this.notes) if (n.active && n.ch === c) { n.on = false; n.sus = false; n.env.release(); if (hard) n.active = false; } }
+  sustainOff(c) { for (const n of this.notes) if (n.active && n.sus && n.ch === c) { n.sus = false; noteRelease(n); } }
+  allOff(c, hard) { for (const n of this.notes) if (n.active && n.ch === c) { n.on = false; n.sus = false; noteRelease(n); if (hard) n.active = false; } }
   pitch(c) {}
-  ctrl(c) { for (const n of this.notes) if (n.active && n.ch === c) n.amp = this.noteAmp(c, n.vel, n.patch); }
+  ctrl(c) { for (const n of this.notes) if (n.active && n.ch === c) n.amp = this.noteAmp(c, n.vel); }
   reset() {
     for (const n of this.notes) n.active = false;
-    this.pend = null; this.gen.reset(); this.gen.blep.clear(); this.spk.clear(); this.toTick = 0; this.sounding = 0;
+    this.pend = null; this.blipNow = null; this.gen.reset(); this.gen.blep.clear(); this.spk.clear(); this.toTick = 0; this.sounding = 0;
+    this.vstate = [0, -1, -1, -1];
   }
   activeCount() { return this.sounding; }
   maxVoices() { return 1; }
 
-  /** current amplitude of a note including tremolo */
-  noteLevel(n) {
-    let e = n.env.e;
-    const pt = n.patch;
-    if (pt.trem && e > 0) e = Math.max(0, e - pt.trem[0] * 0.5 * (1 + Math.sin(2 * Math.PI * n.frames * this.dt * pt.trem[1])));
-    return e <= 0 ? 0 : n.amp * Math.pow(10, (e - 1) * 45 / 20);
-  }
-  semis(n) {
-    const pt = n.patch, ch = this.h.ch[n.ch], f = Math.round((n.frames - 1) * this.dt * 60);   // macros are in 60 Hz frames
-    let s = n.note + pt.oct * 12 + ch.bend * ch.bendRange;
-    if (pt.arp0 && f < pt.arp0.length) s += pt.arp0[f];
-    if (pt.loop) s += pt.loop[f % pt.loop.length];
-    const t = (n.frames - 1) * this.dt;
-    if (pt.sweep) s += Math.max(-pt.sweepMax, Math.min(pt.sweepMax, pt.sweep * t));
-    if (pt.vib && t >= pt.vib[1]) s += pt.vib[0] * tri(t * pt.vib[2]);
-    if (ch.mod) s += (ch.mod / 127) * 0.5 * tri(t * 5.5);
-    return s;
+  isPwm(inst) { return inst.kind === 'speaker' ? !!inst.pwm : !!this.cfg.ayPwm; }
+  level(n) {          // amplitude 0..1 of a note this tick
+    const v = noteVol(n);
+    return v <= 0 ? 0 : n.amp * AY_LEVEL[v];
   }
   tick() {
     this.frame++;
-    const H = this.h, g = this.gen, clock = this.cfg.clock, pwm = this.cfg.volume === 'pwm';
-    for (const n of this.notes) {
-      if (!n.active) continue;
-      if (n.frames > 0) n.env.tick(this.dt);
-      n.frames++;
-      if (n.env.done) n.active = false;
-    }
-    // drums: one blip per tick, highest priority wins
+    const H = this.h, g = this.gen, clock = this.cfg.clock;
+    for (const n of this.notes) if (n.active && !noteTick(n)) n.active = false;
+    // drum blips: one per tick, highest priority wins; they interrupt the tone
     if (this.pend) {
-      const [p, dur] = drumProgram(this.pend.note, this.pend.amp, clock, pwm);
-      const len = pwm ? dur : dur * (0.55 + 0.45 * Math.sqrt(this.pend.amp));
-      g.burst(p, len * clock);
-      if (this.pend.amp > H.meter[this.pend.c]) H.meter[this.pend.c] = this.pend.amp;
+      const p = this.pend, pwm = this.isPwm(p.inst);
+      const [prog, dur] = blipProgram(p.inst.blip, p.note, p.amp, clock, pwm);
+      if (!(this.vmute & 1)) g.burst(prog, dur * clock);
+      if (p.amp > H.meter[p.c]) H.meter[p.c] = p.amp;
+      this.blipNow = { p, until: this.frame + Math.max(1, Math.round(dur * this.frameHz)) };
       this.pend = null;
     }
     // gather sounding notes per MIDI channel (held notes hide releasing ones)
     let best = null, bestKey = -1;
-    const lists = this.byCh;
+    const lists = this.byCh, cand = this.cand || (this.cand = []);
+    cand.length = 0;
     for (let c = 0; c < 16; c++) lists[c].length = 0;
     for (const n of this.notes) if (n.active && n.amp > 0 && !H.mute[n.ch]) lists[n.ch].push(n);
-    const cand = [];
     for (let c = 0; c < 16; c++) {
       const l = lists[c];
       if (!l.length) continue;
       let held = 0, mx = 0, young = 99;
-      for (const n of l) { if (n.on || n.sus) held++; }
+      for (const n of l) if (n.on || n.sus) held++;
       if (held && held < l.length) { let w = 0; for (const n of l) if (n.on || n.sus) l[w++] = n; l.length = w; }
       if (l.length > 4) { l.sort((a, b) => b.age - a.age); l.length = 4; }
       l.sort((a, b) => b.note - a.note);
-      for (const n of l) { n.cur = this.noteLevel(n); if (n.cur > mx) mx = n.cur; if (n.frames < young) young = n.frames; }
-      if (mx < 0.004) continue;
-      const cls = CLASS[l[0].patch.role] || 1;
+      for (const n of l) { n.cur = this.level(n); if (n.cur > mx) mx = n.cur; if (n.frames < young) young = n.frames; }
+      if (mx <= 0) continue;
+      const cls = CLASS[l[0].inst.role] || 1;
       const key = (held ? 8 : 0) + cls * 2 + Math.min(1.99, Math.sqrt(mx) + (young < 4 ? 0.3 : 0));
-      cand.push({ c, l, key, cls, held });
-      if (key > bestKey) { bestKey = key; best = cand[cand.length - 1]; }
+      const x = { c, l, key, cls }; cand.push(x);
+      if (key > bestKey) { bestKey = key; best = x; }
     }
     let n = null;
     if (best) {
       if (this.cfg.mode === 'multiplex' && cand.length > 1) {
-        // time-slice: melody, bass, then the chord notes, one per tick
         cand.sort((a, b) => b.key - a.key);
         const seq = this.seq || (this.seq = []);
         seq.length = 0;
         for (const x of cand) { if (x.cls >= 2) seq.push(x.cls === 3 ? x.l[0] : x.l[x.l.length - 1]); else for (const y of x.l) if (seq.length < 6) seq.push(y); }
         n = seq[this.frame % seq.length];
-      } else n = best.l.length > 1 ? best.l[this.frame % best.l.length] : best.l[0];
+      } else {
+        const sp = Math.max(1, best.l[0].inst.arpSpeed || 1);
+        n = best.l.length > 1 ? best.l[Math.floor(this.frame / sp) % best.l.length] : best.l[0];
+      }
     }
     this.sounding = 0;
-    if (!n) { g.off(); return; }
-    const a = n.cur, pt = n.patch;
-    if (a < 0.004) { g.off(); return; }
+    const bl = this.blipNow && this.frame < this.blipNow.until ? this.blipNow.p : null;
+    if (bl) this.vstate = [this.vmute ? 0 : bl.amp, bl.c, bl.note, bl.idx];
+    if (!n || this.vmute & 1) { g.off(); if (!bl) this.vstate = [0, -1, -1, -1]; return; }
+    const a = n.cur, I = n.inst;
     if (a > H.meter[n.ch]) H.meter[n.ch] = a;
     this.sounding = 1;
-    const s = this.semis(n);
-    if (pt.mix === 2) {                     // noise patches: random edge gaps scaled by pitch
-      const us = clock * 1e-6, base = Math.max(8, 0.25e6 / midiHz(s));
+    if (!bl) this.vstate = [a, n.ch, n.note, n.idx];
+    const semis = notePitch(n, H.ch[n.ch], this.frameHz);
+    const hz = midiHz(semis), pwm = this.isPwm(I);
+    const noisy = I.kind === 'speaker' ? !!I.noisy : (I.mixer && macroVal(I.mixer, n.im) === 2);
+    const us = clock * 1e-6;
+    if (noisy) {
+      const base = Math.max(8, 0.25e6 / hz);
       g.setNoise(base * 0.3 * us, base * 1.7 * us, pwm ? (6 + 34 * Math.sqrt(Math.min(1, a * 1.5))) * us : 0);
       return;
     }
-    const hz = midiHz(s);
+    const duty = Math.max(0.01, Math.min(0.5, (I.duty || 50) / 100));
+    const frac = pwm ? Math.min(duty, Math.asin(Math.min(1, a * 2.2)) / Math.PI) : duty;
+    const off = I.kind === 'speaker' && I.pitch ? macroVal(I.pitch, n.ip) : 0;
     if (this.cfg.timer === 'pit') {
-      const N = Math.max(2, Math.min(65535, Math.round(clock / hz)));   // 8253 divisor
-      let hi = Math.ceil(N / 2);
-      if (pwm) hi = Math.max(2, Math.round(N * Math.asin(Math.min(1, a * 2.2)) / Math.PI));
+      const N = Math.max(2, Math.min(65535, Math.round(clock / hz) + off));    // 8253 divisor
+      const hi = frac >= 0.5 ? Math.ceil(N / 2) : Math.max(1, Math.round(N * frac));
       g.setTone(hi, N - hi);
     } else {
-      const q = this.cfg.quantum || 5;                                     // delay-loop granularity
-      const P = Math.max(4 * q, Math.round(clock / hz / q) * q);
-      let hi = Math.round(P / 2 / q) * q;
-      if (pwm) hi = Math.max(q, Math.round(P * Math.asin(Math.min(1, a * 2.2)) / Math.PI / q) * q);
+      const q = this.cfg.quantum || 5;                                       // delay-loop granularity
+      const P = Math.max(4 * q, Math.round((clock / hz + off) / q) * q);
+      const hi = Math.max(q, Math.round(P * frac / q) * q);
       g.setTone(hi, P - hi);
     }
   }

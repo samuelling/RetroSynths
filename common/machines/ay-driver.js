@@ -1,120 +1,141 @@
-// General MIDI → AY-3-8910 / YM2149 music driver (own code), shared by apple2, zx and msx.
+// AY-3-8910 / YM2149 music driver (own code), shared by apple2, zx and msx.
 //
-// Works like an 8-bit game music engine: an interrupt at frame rate (50/60 Hz) runs the driver, which
-// steps software envelopes and pitch macros and writes the chip registers. Everything it does is
-// expressed in what the chip can do: 12-bit periods, 4-bit volume, one noise period and one hardware
-// envelope per chip.
+// Works like an 8-bit game / tracker replay routine: an interrupt at frame rate (50/60 Hz) steps every
+// sounding instrument's macros (volume, arpeggio, pitch, noise, mixer, hardware envelope — see
+// ay-instruments.js) and writes the chip registers. Everything is expressed in what the chip can do:
+// 12-bit periods, 4-bit volume, one noise period and one hardware envelope per chip.
 //
 // Voice allocation, re-done every frame:
-//   · MIDI channels become "parts"; each part is scored by role (lead > bass > perc > chord > fx > pad),
-//     current loudness and recency.
-//   · Drums claim a chip channel first (noise / tone-sweep macros), like the "channel C steals" trick.
-//   · Every part gets one channel in score order; spare channels give multi-note parts real polyphony.
-//   · A part with more notes than channels plays them as a per-frame arpeggio (the classic fake chord);
-//     chord/pad parts that lost their channel fold into another chord part's arpeggio.
-//   · Parts stick to their previous channel; in stereo set-ups they prefer the chip/channel nearest
-//     their pan.
-//   · Bass patches may take the chip's hardware envelope as a "buzzer" waveform (sawtooth / triangle /
-//     tone-gated saw at the note's pitch), one per chip.
+//   · MIDI channels pinned to a chip channel (Arranger) take it first; drums (one-shot instruments) claim
+//     a channel next, like the "channel C steals" trick;
+//   · remaining MIDI channels become "parts" scored by role (lead > bass > perc > chord > fx > pad),
+//     loudness and recency; each gets one channel in score order, spare channels give polyphony;
+//   · a part with more notes than channels plays them as a per-frame arpeggio (the classic fake chord),
+//     chord/pad parts that lost their channel fold into another chord part's arpeggio;
+//   · parts stick to their channel; in stereo set-ups they prefer the chip/channel nearest their pan;
+//   · instruments using the hardware envelope get it one per chip (highest score), others fall back to
+//     the plain tone at their macro volume.
 
-import { midiHz, gmLevel, drumKind, TOM_NOTE } from './util.js';
-import { patchFor, ROLE_W, MERGEABLE, LogEnv, noiseForNote } from './ay-patches.js';
+import { midiHz, gmLevel } from './util.js';
+import { ROLE_W, MERGEABLE, noiseForNote } from './ay-patches.js';
 import { Blep } from './beeper-dsp.js';
 import { AYChip } from './ay.js';
 
 const NOTE_POOL = 64;
 const MAX_ARP = 4;
+const CONT_SHAPES = new Set([8, 10, 12, 14]);
+
+const MAC = (v) => ({ values: [v], loop: -1, release: -1 });
+const okMacro = (m, def) => (m && Array.isArray(m.values) && m.values.length) ? m : MAC(def);
+/** Fill in anything missing from an instrument (older saves, hand-made JSON) so the driver never trips. */
+export function normInst(I) {
+  if (!I || typeof I !== 'object') return null;
+  I.vol = okMacro(I.vol, 15); I.arp = okMacro(I.arp, 0);
+  if (I.kind !== 'speaker') { I.pitch = okMacro(I.pitch, 0); I.noise = okMacro(I.noise, 0); I.mixer = okMacro(I.mixer, 1); }
+  else I.pitch = okMacro(I.pitch, 0);
+  if (!I.env || typeof I.env !== 'object') I.env = { shape: -1, mode: 'note', ratio: 1, period: 1000 };
+  if (!I.vib) I.vib = { depth: 0, delay: 0, speed: 8 };
+  if (!I.slide) I.slide = { speed: 0, limit: 0 };
+  if (I.type === 'blip' && !I.blip) I.blip = { mode: 'tone', hz: 800, ms: 40, sweep: 0, gapMin: 20, gapMax: 200, rel: 0 };
+  return I;
+}
+
+/** Advance a macro index by one step (FamiTracker loop / release semantics). */
+export function stepMacro(m, i, released) {
+  const len = m.values.length;
+  i++;
+  if (!released && m.release >= 0 && i >= m.release) return (m.loop >= 0 && m.loop < m.release) ? m.loop : m.release - 1;
+  if (i >= len) return (m.loop >= 0 && (!released || m.release < 0 || m.loop >= m.release)) ? m.loop : len - 1;
+  return i;
+}
+export const macroVal = (m, i) => m.values[Math.min(i, m.values.length - 1)] || 0;
+const tri = (ph) => { const x = ph - Math.floor(ph); return x < 0.25 ? 4 * x : x < 0.75 ? 2 - 4 * x : 4 * x - 4; };
 
 class Note {
-  constructor() { this.active = false; this.env = new LogEnv(); this.ch = 0; this.note = 0; this.vel = 0; this.on = false; this.sus = false; this.age = 0; this.frames = 0; this.amp = 0; this.patch = null; this.cur = 0; }
+  constructor() { this.active = false; this.ch = 0; this.note = 0; this.vel = 0; this.on = false; this.sus = false; this.age = 0; this.frames = 0; this.amp = 0; this.inst = null; this.idx = -1; this.cur = 0; this.rel = false; this.relCap = 15; this.iv = 0; this.ia = 0; this.ip = 0; this.inz = 0; this.im = 0; this.vsub = 0; this.slide = 0; }
 }
 class Part {
-  constructor(c) { this.c = c; this.notes = []; this.score = 0; this.nv = 0; this.merged = []; this.had = false; this.pan = 0.5; this.patch = null; }
+  constructor(c) { this.c = c; this.notes = []; this.score = 0; this.nv = 0; this.merged = []; this.had = false; this.pan = 0.5; this.inst = null; this.pin = null; }
 }
 
-// ---------------------------------------------------------------- drum macros (per driver frame)
-// frame = [volume 0..15, mix (0 tone, 1 tone+noise, 2 noise), noise period, tone Hz]
-function decay(v0, frames, f) {
-  const out = [];
-  for (let i = 0; i < frames; i++) { const v = Math.max(1, Math.round(v0 - (v0 - 1) * i / Math.max(1, frames - 1))); out.push([v, ...f(i)]); }
-  return out;
+/** Per-note frame state: macros, pitch and level. Shared with the 1-bit driver. */
+export function noteStart(n, inst, idx) {
+  n.inst = inst; n.idx = idx; n.frames = 0; n.rel = false; n.relCap = 15;
+  n.iv = n.ia = n.ip = n.inz = n.im = 0; n.vsub = 0; n.slide = 0;
 }
-const sweep = (h0, h1, n) => (i) => h0 * Math.pow(h1 / h0, Math.min(1, i / Math.max(1, n - 1)));
-export function ayDrumMacro(n) {
-  const k = drumKind(n);
-  switch (k) {
-    case 'kick': { const lo = n === 35 ? 0.85 : 1; return decay(15, 8, (i) => [i === 0 ? 1 : 0, 14, sweep(150 * lo, 42 * lo, 6)(i)]); }
-    case 'snare': return decay(15, n === 40 ? 8 : 10, (i) => i === 0 ? [1, n === 40 ? 4 : 6, 230] : [2, (n === 40 ? 3 : 5) + (i >> 1), 0]);
-    case 'stick': return [[14, 1, 1, 1700], [9, 0, 0, 1250], [4, 0, 0, 1250]];
-    case 'clap': return [[13, 2, 3, 0], [3, 2, 3, 0], [13, 2, 3, 0], ...decay(12, 7, (i) => [2, 4 + (i >> 1), 0])];
-    case 'hatClosed': return [[12, 2, 0, 0], [8, 2, 0, 0], [3, 2, 0, 0]];
-    case 'hatPedal': return [[10, 2, 1, 0], [6, 2, 1, 0], [2, 2, 1, 0]];
-    case 'hatOpen': return decay(13, 16, (i) => [2, i & 1, 0]);
-    case 'crash': {
-      const len = n === 55 ? 20 : 44, np = n === 52 ? 4 : 2;
-      return decay(14, len, (i) => [2, np + (i % 3 === 0 ? 1 : 0), 0]);
-    }
-    case 'ride': return decay(12, 26, (i) => i < 2 ? [1, 0, 3400] : [1, 1, 3100]);
-    case 'bell': return decay(13, 24, (i) => [0, 0, i & 1 ? 2150 : 1420]);
-    case 'tom': { const t = TOM_NOTE[n] || 50; return decay(15, 9, (i) => [i === 0 ? 1 : 0, 10, sweep(midiHz(t + 7), midiHz(t - 5), 8)(i)]); }
-    case 'conga': {
-      const t = TOM_NOTE[n] || 64, mute = n === 62;
-      return decay(14, mute ? 3 : 6, (i) => [0, 0, sweep(midiHz(t + 3), midiHz(t), 4)(i)]);
-    }
-    case 'cowbell':
-      if (n === 56) return decay(13, 9, (i) => [0, 0, i & 1 ? 545 : 810]);
-      return decay(12, 6, (i) => [0, 0, n === 67 ? 1000 : 760]);   // agogo
-    case 'shaker':
-      if (n === 54) return [[11, 2, 0, 0], [8, 2, 0, 0], [11, 2, 0, 0], [7, 2, 0, 0], [5, 2, 0, 0], [3, 2, 0, 0]];
-      return [[9, 2, 0, 0], [6, 2, 0, 0], [3, 2, 0, 0]];
-    case 'block': return decay(13, 3, () => [0, 0, n === 75 ? 2500 : n === 76 ? 1250 : 950]);
-    case 'triangle': return decay(12, n === 80 ? 4 : 32, (i) => [0, 0, i & 1 ? 4480 : 4420]);
-    default:
-      switch (n) {
-        case 58: return decay(12, 20, (i) => [i & 1 ? 2 : 1, 6, 300]);                            // vibraslap
-        case 71: return decay(12, 8, (i) => [0, 0, 2350 + (i & 1) * 40]);                          // short whistle
-        case 72: return decay(12, 26, (i) => [0, 0, 2350 + (i & 2) * 20]);                         // long whistle
-        case 73: return [[11, 2, 6, 0], [2, 2, 6, 0], [11, 2, 6, 0], [2, 2, 6, 0], [9, 2, 6, 0]];  // short guiro
-        case 74: return decay(11, 14, (i) => [2, i & 1 ? 9 : 5, 0]);                               // long guiro
-        case 78: return decay(12, 5, (i) => [0, 0, sweep(420, 720, 5)(i)]);                        // mute cuica
-        case 79: return decay(12, 10, (i) => [0, 0, sweep(650, 300, 10)(i)]);                     // open cuica
-        default: return decay(12, 5, (i) => [1, 3, midiHz(n + 12)]);
-      }
+export function noteRelease(n) {
+  if (n.rel) return;
+  const I = n.inst;
+  n.relCap = macroVal(I.vol, n.iv);
+  n.rel = true;
+  for (const [k, key] of [['vol', 'iv'], ['arp', 'ia'], ['pitch', 'ip'], ['noise', 'inz'], ['mixer', 'im']]) {
+    const m = I[k]; if (m && m.release >= 0 && m.release < m.values.length) n[key] = m.release;
   }
+  if (I.vol.release < 0 && I.role !== 'drum') n.cut = true;    // no release segment: note-off cuts
 }
-const DRUM_PRIO = { kick: 9, snare: 8, clap: 7, tom: 7, crash: 6, stick: 5, conga: 5, cowbell: 5, bell: 4, ride: 4, block: 4, triangle: 3, perc: 3, hatOpen: 3, shaker: 2, hatClosed: 2, hatPedal: 1 };
-const MACRO_CACHE = [];
-const macroFor = (n) => MACRO_CACHE[n] || (MACRO_CACHE[n] = ayDrumMacro(n));
+/** Step a note's macros one frame; returns false when the note has finished. */
+export function noteTick(n) {
+  const I = n.inst;
+  if (n.cut) return false;
+  if (n.frames > 0) {
+    if (++n.vsub >= (I.volSpeed || 1)) { n.vsub = 0; n.iv = stepMacro(I.vol, n.iv, n.rel); }
+    n.ia = stepMacro(I.arp, n.ia, n.rel);
+    if (I.pitch) n.ip = stepMacro(I.pitch, n.ip, n.rel);
+    if (I.noise) n.inz = stepMacro(I.noise, n.inz, n.rel);
+    if (I.mixer) n.im = stepMacro(I.mixer, n.im, n.rel);
+    if (I.slide && I.slide.speed) { n.slide += I.slide.speed; if (I.slide.limit > 0) n.slide = Math.max(-I.slide.limit, Math.min(I.slide.limit, n.slide)); }
+  }
+  n.frames++;
+  const v = I.vol, last = v.values.length - 1;
+  if (n.frames > 1 && n.iv >= last && !macroVal(v, last)) {
+    const loops = v.loop >= 0 && (!n.rel || v.release < 0 || v.loop >= v.release);
+    if (!loops) return false;
+  }
+  return true;
+}
+/** Current 4-bit macro volume (with the release cap). */
+export const noteVol = (n) => Math.min(macroVal(n.inst.vol, n.iv), n.rel ? n.relCap : 15);
+/** Pitch of a note this frame in semitones (float), before the period-offset macro. */
+export function notePitch(n, ch, fps) {
+  const I = n.inst, f = n.frames - 1;
+  const a = macroVal(I.arp, n.ia);
+  let s = I.arpMode === 'fixed' ? a : n.note + a + ch.bend * ch.bendRange;
+  s += I.transpose || 0;
+  let cents = n.slide;
+  const vb = I.vib;
+  if (vb && vb.depth && f >= vb.delay) cents += vb.depth * tri((f - vb.delay) / Math.max(2, vb.speed));
+  if (ch.mod) cents += (ch.mod / 127) * 50 * tri(f * 5.5 / fps);
+  return s + cents / 100;
+}
 
-// ---------------------------------------------------------------- the driver
 export class AYDriver {
   /**
-   * cfg:
-   *   chips: [{ clock, variant }],  frameHz,
-   *   panMode: 'mono' | 'chips' (chip 0 → L, chip 1 → R) | 'ABC' (A left, B centre, C right),
-   *   buzz: allow hardware-envelope bass,  drumVoices: max chip channels drums may take,
-   *   gain: output scale
+   * cfg: chips [{ clock, variant }], frameHz, panMode 'mono' | 'chips' | 'ABC', drumVoices, gain, drumGain,
+   *      lib { presets, gmPreset, gmDrum }, voiceIds [ids of the chip channels, in slot order]
    */
   constructor(host, cfg) {
     this.h = host; this.sr = host.sampleRate;
     this.cfg = cfg;
     this.frameHz = cfg.frameHz; this.dt = 1 / cfg.frameHz;
     this.blepL = new Blep(this.sr); this.blepR = new Blep(this.sr);
-    this.chips = [];
     this.makeChips();
-    // inverse DAC lookup thresholds for fixed volume levels (geometric means between neighbours)
     const amp = (v) => this.chips[0].levelAmp(v);
     this.ampOf = Float64Array.from({ length: 16 }, (_, v) => amp(v));
     this.thr = Float64Array.from({ length: 15 }, (_, v) => v === 0 ? amp(1) * 0.5 : Math.sqrt(amp(v) * amp(v + 1)));
     this.notes = Array.from({ length: NOTE_POOL }, () => new Note());
     this.parts = Array.from({ length: 16 }, (_, c) => new Part(c));
-    this.drums = Array.from({ length: 6 }, () => ({ active: false, n: 0, f: 0, macro: null, amp: 0, prio: 0, age: 0, c: 9 }));
+    this.drums = Array.from({ length: 6 }, () => new Note());
+    this.table = cfg.lib.presets.map(p => normInst({ ...p }));
+    this.gmDrum = cfg.lib.gmDrum;
+    this.arr = Array.from({ length: 16 }, () => ({ inst: -1, voice: 'auto' }));
+    this.kit = {};
+    this.vmute = 0;
     this.age = 0; this.frame = 0; this.toTick = 0;
-    this.arpSpeed = 1;
     this.dcL = 0; this.dcR = 0; this.dcxL = 0; this.dcxR = 0; this.dcK = Math.exp(-2 * Math.PI * 18 / this.sr);
     this.gain = cfg.gain || 0.5;
     this.sounding = 0;
     this.reqs = [];
+    this.vs = new Float32Array(this.slots.length * 4);
     this.silence();
   }
   makeChips() {
@@ -123,7 +144,7 @@ export class AYDriver {
     this.chips = cfg.chips.map((cc) => new AYChip({ clock: cc.clock, variant: cc.variant, sampleRate: this.sr, outL: this.blepL, outR: this.blepR }));
     for (let ci = 0; ci < this.chips.length; ci++)
       for (let i = 0; i < 3; i++)
-        this.slots.push({ chip: this.chips[ci], ci, i, pan: 0.5, lastKey: -1, taken: false, drum: null, req: null, buzzNote: null, idle: 0 });
+        this.slots.push({ chip: this.chips[ci], ci, i, n: this.slots.length, vid: cfg.voiceIds ? cfg.voiceIds[ci * 3 + i] : 'ABC'[i], pan: 0.5, lastKey: -1, taken: false, drum: null, req: null, buzzNote: null, idle: 0, lvl: 0, ch: -1, note: -1, idx: -1 });
     const m = cfg.panMode; cfg.panMode = null;
     this.setPanMode(m);
   }
@@ -138,61 +159,85 @@ export class AYDriver {
   silence() {
     for (const c of this.chips) {
       c.reset();
-      c.write(7, 0xFF);                 // all tone and noise off (I/O ports as inputs... bits 6/7 set: outputs; harmless)
+      c.write(7, 0xFF);
       for (let r = 8; r <= 10; r++) c.write(r, 0);
     }
-    for (const s of this.slots) { s.lastKey = -1; s.buzzNote = null; s.vol = 0; }
+    for (const s of this.slots) { s.lastKey = -1; s.buzzNote = null; s.lvl = 0; s.ch = -1; }
+  }
+
+  // ------------------------------------------------------------ v2 interface
+  setInstruments(list) { this.table = list.map(p => normInst({ ...p })); for (const n of [...this.notes, ...this.drums]) if (n.active && this.table[n.idx]) n.inst = this.table[n.idx]; }
+  updateInstrument(i, inst) {
+    this.table[i] = normInst({ ...inst });
+    for (const n of [...this.notes, ...this.drums]) if (n.active && n.idx === i) n.inst = this.table[i];   // macro indices are clamped on read
+  }
+  setArrangement(arr) { for (let c = 0; c < 16; c++) this.arr[c] = arr && arr[c] ? { inst: arr[c].inst, voice: arr[c].voice || 'auto' } : { inst: -1, voice: 'auto' }; }
+  setKit(kit) { this.kit = kit || {}; }
+  setVoiceMute(mask) { this.vmute = mask | 0; }
+  voiceState() {
+    const v = this.vs;
+    this.slots.forEach((s, i) => { v[i * 4] = s.lvl; v[i * 4 + 1] = s.ch; v[i * 4 + 2] = s.note; v[i * 4 + 3] = s.idx; });
+    return v;
+  }
+  /** table index for a note on MIDI channel c */
+  resolve(c, note) {
+    const ch = this.h.ch[c], a = this.arr[c];
+    if (a.inst >= 0 && this.table[a.inst]) return a.inst;
+    if (ch.drum) { const k = this.kit[note]; return k != null && this.table[k] ? k : this.gmDrum(note); }
+    return this.cfg.lib.gmPreset(ch.program);
+  }
+  pinSlot(c) {
+    const v = this.arr[c].voice;
+    if (!v || v === 'auto') return null;
+    for (const s of this.slots) if (s.vid === v) return s;
+    return null;
   }
 
   // ------------------------------------------------------------ MIDI
-  noteAmp(c, vel, patch) {
-    if (this.h.mute[c]) return 0;
-    return Math.min(1, 1.6 * gmLevel(this.h.ch[c], vel) * patch.gain);
-  }
+  noteAmp(c, vel) { return this.h.mute[c] ? 0 : Math.min(1, 1.6 * gmLevel(this.h.ch[c], vel)); }
   noteOn(c, note, vel) {
-    const ch = this.h.ch[c];
-    if (ch.drum) { this.drumOn(c, note, vel); return; }
+    const idx = this.resolve(c, note), inst = this.table[idx];
+    if (!inst) return;
+    if (this.route && this.route(inst, idx, c, note, vel)) return;   // e.g. Apple II speaker instruments
+    if (inst.kind !== 'ay' && inst.kind !== 'any') return;
+    if (inst.role === 'drum') { this.drumOn(c, note, vel, inst, idx); return; }
     let n = null;
     for (const x of this.notes) if (x.active && x.ch === c && x.note === note) { n = x; break; }
-    if (!n) n = this.allocNote();
-    const patch = patchFor(ch.program);
-    n.active = true; n.ch = c; n.note = note; n.vel = vel; n.on = true; n.sus = false; n.age = ++this.age; n.frames = 0;
-    n.patch = patch; n.amp = this.noteAmp(c, vel, patch); n.env.start(patch); n.vibPh = 0;
+    if (!n) n = this.allocNote(this.notes);
+    n.active = true; n.ch = c; n.note = note; n.vel = vel; n.on = true; n.sus = false; n.age = ++this.age; n.cut = false;
+    n.amp = this.noteAmp(c, vel);
+    noteStart(n, inst, idx);
   }
-  allocNote() {
+  allocNote(pool) {
     let best = null, ba = Infinity;
-    for (const x of this.notes) if (!x.active) return x;
-    for (const x of this.notes) if (!x.on && !x.sus && x.age < ba) { best = x; ba = x.age; }
+    for (const x of pool) if (!x.active) return x;
+    for (const x of pool) if (!x.on && !x.sus && x.age < ba) { best = x; ba = x.age; }
     if (best) return best;
-    for (const x of this.notes) if (x.age < ba) { best = x; ba = x.age; }
+    for (const x of pool) if (x.age < ba) { best = x; ba = x.age; }
     return best;
   }
-  drumOn(c, note, vel) {
-    const amp = this.h.mute[c] ? 0 : Math.min(1, 1.6 * gmLevel(this.h.ch[c], vel));
+  drumOn(c, note, vel, inst, idx) {
+    const amp = this.noteAmp(c, vel);
     if (amp <= 0) return;
-    if (this.extDrum && this.extDrum(note, vel, amp, c)) return;   // e.g. Apple II speaker drums
-    if (note < 27 || note > 87) return;
-    let d = null;
-    for (const x of this.drums) if (!x.active) { d = x; break; }
-    if (!d) { let ba = Infinity; for (const x of this.drums) if (x.age < ba) { ba = x.age; d = x; } }
-    const k = drumKind(note);
+    const d = this.allocNote(this.drums);
     // hi-hats choke each other
-    if (k === 'hatClosed' || k === 'hatPedal') for (const x of this.drums) if (x.active && drumKind(x.n) === 'hatOpen') x.active = false;
-    Object.assign(d, { active: true, n: note, f: -1, macro: macroFor(note), amp, prio: DRUM_PRIO[k] || 3, age: ++this.age, c });
+    if (note === 42 || note === 44) for (const x of this.drums) if (x.active && x.note === 46 && x.ch === c) x.active = false;
+    d.active = true; d.ch = c; d.note = note; d.vel = vel; d.on = false; d.sus = false; d.age = ++this.age; d.cut = false; d.amp = amp;
+    noteStart(d, inst, idx);
   }
   noteOff(c, note) {
     for (const n of this.notes) if (n.active && n.on && n.ch === c && n.note === note) {
       n.on = false;
-      if (this.h.ch[c].sustain) n.sus = true; else n.env.release();
+      if (this.h.ch[c].sustain) n.sus = true; else noteRelease(n);
     }
   }
-  sustainOff(c) { for (const n of this.notes) if (n.active && n.sus && n.ch === c) { n.sus = false; n.env.release(); } }
+  sustainOff(c) { for (const n of this.notes) if (n.active && n.sus && n.ch === c) { n.sus = false; noteRelease(n); } }
   allOff(c, hard) {
-    for (const n of this.notes) if (n.active && n.ch === c) { n.on = false; n.sus = false; n.env.release(); if (hard) n.active = false; }
-    if (hard) for (const d of this.drums) if (d.c === c) d.active = false;
+    for (const n of this.notes) if (n.active && n.ch === c) { n.on = false; n.sus = false; noteRelease(n); if (hard) n.active = false; }
+    if (hard) for (const d of this.drums) if (d.ch === c) d.active = false;
   }
   pitch(c) {}                     // periods are recomputed every driver frame
-  ctrl(c) { for (const n of this.notes) if (n.active && n.ch === c) n.amp = this.noteAmp(c, n.vel, n.patch); }
+  ctrl(c) { for (const n of this.notes) if (n.active && n.ch === c) n.amp = this.noteAmp(c, n.vel); }
   reset() {
     for (const n of this.notes) n.active = false;
     for (const d of this.drums) d.active = false;
@@ -213,23 +258,51 @@ export class AYDriver {
   }
   tick() {
     this.frame++;
-    const dt = this.dt, H = this.h;
-    for (const n of this.notes) {
-      if (!n.active) continue;
-      if (n.frames > 0) n.env.tick(dt);
-      n.frames++;
-      if (n.env.done) n.active = false;
-    }
-    for (const d of this.drums) if (d.active && (++d.f >= d.macro.length || H.mute[d.c])) d.active = false;
-
-    // ---- drums claim channels
+    const H = this.h;
+    for (const n of this.notes) if (n.active && !noteTick(n)) n.active = false;
+    for (const d of this.drums) if (d.active && (!noteTick(d) || H.mute[d.ch])) d.active = false;
     for (const s of this.slots) { s.taken = false; s.drum = null; s.req = null; }
+
+    // ---- build parts
+    const parts = this.parts, act = [];
+    for (const p of parts) { p.notes.length = 0; p.merged.length = 0; p.nv = 0; p.pin = null; }
+    for (const n of this.notes) if (n.active && n.amp > 0 && !H.mute[n.ch] && (n.frames < 2 || noteVol(n) > 0)) parts[n.ch].notes.push(n);
+    for (const p of parts) {
+      if (!p.notes.length) { p.had = false; continue; }
+      let held = 0;
+      for (const n of p.notes) if (n.on || n.sus) held++;
+      if (held && held < p.notes.length) { let w = 0; for (const n of p.notes) if (n.on || n.sus) p.notes[w++] = n; p.notes.length = w; }
+      if (p.notes.length > MAX_ARP) { p.notes.sort((a, b) => b.age - a.age); p.notes.length = MAX_ARP; }
+      p.notes.sort((a, b) => b.note - a.note);
+      let mx = 0, young = 99;
+      for (const n of p.notes) { n.cur = n.amp * this.ampOf[noteVol(n)]; if (n.cur > mx) mx = n.cur; if (n.frames < young) young = n.frames; }
+      p.inst = p.notes[0].inst;
+      p.score = (ROLE_W[p.inst.role] || 0.6) * Math.sqrt(mx) + (young < 6 ? 0.25 : 0) + (p.had ? 0.08 : 0);
+      p.pan = Math.max(0, Math.min(1, (H.ch[p.c].pan - 1) / 126));
+      p.pin = this.pinSlot(p.c);
+      act.push(p);
+    }
+    act.sort((a, b) => b.score - a.score);
+
+    // ---- pinned parts take their channel
+    let used = 0;
+    const reqs = this.reqs; reqs.length = 0;
+    for (const p of act) {
+      if (!p.pin) continue;
+      p.had = true;
+      if (p.pin.taken) continue;
+      const r = { p, k: 0, key: p.c * 8, slot: p.pin }; p.nv = 1;
+      p.pin.taken = true; p.pin.req = r; reqs.push(r); used++;
+    }
+    // ---- drums claim channels
     let dv = 0;
     const maxD = this.cfg.drumVoices || 1;
-    const dl = this.drums.filter(d => d.active).sort((a, b) => (b.prio - a.prio) || (b.age - a.age));
+    const dsc = (d) => (d.inst.prio || 3) + (d.frames <= 3 ? 10 : 0) - d.frames * 0.15;   // fresh hits win, tails yield
+    const dl = this.drums.filter(d => d.active).sort((a, b) => (dsc(b) - dsc(a)) || (b.age - a.age));
     for (const d of dl) {
-      if (dv >= maxD) break;
-      // preferred drum channel: C of each chip (B in ABC stereo, the centre)
+      const pin = this.pinSlot(d.ch);
+      if (pin) { if (!pin.taken) { pin.taken = true; pin.drum = d; } continue; }
+      if (dv >= maxD) continue;
       let best = null, bc = Infinity;
       for (const s of this.slots) {
         if (s.taken) continue;
@@ -240,49 +313,31 @@ export class AYDriver {
       if (!best) break;
       best.taken = true; best.drum = d; dv++;
     }
-
-    // ---- build parts
-    const parts = this.parts, act = [];
-    for (const p of parts) { p.notes.length = 0; p.merged.length = 0; p.nv = 0; }
-    for (const n of this.notes) if (n.active && n.amp > 0 && !H.mute[n.ch]) parts[n.ch].notes.push(n);
-    for (const p of parts) {
-      if (!p.notes.length) { p.had = false; continue; }
-      let held = 0;
-      for (const n of p.notes) if (n.on || n.sus) held++;
-      if (held && held < p.notes.length) { let w = 0; for (const n of p.notes) if (n.on || n.sus) p.notes[w++] = n; p.notes.length = w; }
-      if (p.notes.length > MAX_ARP) { p.notes.sort((a, b) => b.age - a.age); p.notes.length = MAX_ARP; }
-      p.notes.sort((a, b) => b.note - a.note);
-      let mx = 0, young = 99;
-      for (const n of p.notes) { n.cur = n.amp * n.env.amp; if (n.cur > mx) mx = n.cur; if (n.frames < young) young = n.frames; }
-      p.patch = p.notes[0].patch;
-      p.score = ROLE_W[p.patch.role] * Math.sqrt(mx) + (young < 6 ? 0.25 : 0) + (p.had ? 0.08 : 0);
-      p.pan = Math.max(0, Math.min(1, (H.ch[p.c].pan - 1) / 126));
-      act.push(p);
-    }
-    act.sort((a, b) => b.score - a.score);
-    let avail = this.slots.length - dv;
-    for (const p of act) if (avail > 0) { p.nv = 1; avail--; }
-    for (const p of act) while (avail > 0 && p.nv < p.notes.length) { p.nv++; avail--; }
-    for (const p of act) {
-      if (p.nv || !MERGEABLE[p.patch.role]) continue;
+    let avail = 0;
+    for (const s of this.slots) if (!s.taken) avail++;
+    const free = act.filter(p => !p.pin);
+    for (const p of free) if (avail > 0) { p.nv = 1; avail--; }
+    for (const p of free) while (avail > 0 && p.nv < p.notes.length) { p.nv++; avail--; }
+    for (const p of free) {
+      if (p.nv || !MERGEABLE[p.inst.role]) continue;
       let tgt = null;
       for (let i = act.length - 1; i >= 0; i--) {
         const q = act[i];
-        if (q.nv && MERGEABLE[q.patch.role] && (q.notes.length - q.nv + 1) + q.merged.length + p.notes.length <= MAX_ARP) { tgt = q; break; }
+        if (q.nv && MERGEABLE[q.inst.role] && (q.notes.length - q.nv + 1) + q.merged.length + p.notes.length <= MAX_ARP) { tgt = q; break; }
       }
       if (tgt) for (const n of p.notes) tgt.merged.push(n);
     }
 
-    // ---- requests → chip channels (sticky, pan-aware)
-    const reqs = this.reqs; reqs.length = 0;
-    for (const p of act) {
+    // ---- requests → chip channels (sticky, pan- and load-aware)
+    for (const p of free) {
       p.had = p.nv > 0;
       for (let k = 0; k < p.nv; k++) reqs.push({ p, k, key: p.c * 8 + k, slot: null });
     }
-    // keep a part on its channel while it holds the same notes; re-place it (by pan and chip load) at onsets
     const load = this.load || (this.load = new Float64Array(8));
     load.fill(0);
+    for (const r of reqs) if (r.slot) load[r.slot.ci] += r.p.score;
     for (const r of reqs) {
+      if (r.slot) continue;
       let onset = false;
       for (const n of r.p.notes) if (n.frames === 1) onset = true;
       if (onset && this.cfg.panMode === 'chips') continue;
@@ -303,84 +358,82 @@ export class AYDriver {
       best.taken = true; best.req = r; r.slot = best; load[best.ci] += r.p.score;
     }
 
-    // ---- hardware envelope ("buzzer") ownership: one bass part per chip
-    const envOwner = this.envOwner || (this.envOwner = []);
-    for (let ci = 0; ci < this.chips.length; ci++) envOwner[ci] = null;
-    if (this.cfg.buzz) {
-      for (const r of reqs) {
-        if (!r.slot || r.k !== 0) continue;
-        const p = r.p, n = p.notes[0];
-        if (!p.patch.buzz || p.nv !== p.notes.length || p.notes.length !== 1 || p.merged.length) continue;
-        if (!(n.on || n.sus) || n.cur < 0.08) continue;
-        const ci = r.slot.ci;
-        if (!envOwner[ci] || envOwner[ci].p.score < p.score) envOwner[ci] = r;
+    // ---- pick the note each channel plays this frame
+    for (const s of this.slots) {
+      s.play = null;
+      if (s.drum) { s.play = s.drum; continue; }
+      const r = s.req; if (!r) continue;
+      const p = r.p;
+      if ((p.nv >= p.notes.length && !p.merged.length) || r.k < p.nv - 1) s.play = p.notes[r.k];
+      else {
+        const start = p.nv - 1, own = p.notes.length - start, cnt = own + p.merged.length;
+        const idx = this.frame % cnt;
+        s.play = idx < own ? p.notes[start + idx] : p.merged[idx - own];
       }
+    }
+    // ---- hardware envelope ownership: one per chip, highest score
+    const owner = this.envOwner || (this.envOwner = []);
+    for (let ci = 0; ci < this.chips.length; ci++) owner[ci] = null;
+    for (const s of this.slots) {
+      const n = s.play; if (!n || n.inst.env.shape < 0 || n.rel || !macroVal(n.inst.vol, n.iv)) continue;
+      const sc = s.drum ? 9 : s.req.p.score;
+      const o = owner[s.ci];
+      if (!o || o.sc < sc) owner[s.ci] = { s, sc };
     }
 
     // ---- compute and write registers
     let sounding = 0;
+    const fps = this.frameHz;
     for (let ci = 0; ci < this.chips.length; ci++) {
       const chip = this.chips[ci];
       let mixer = 0x3F, noiseP = -1, noisePrio = -1;
       for (let i = 0; i < 3; i++) {
-        const s = this.slots[ci * 3 + i];
+        const s = this.slots[ci * 3 + i], n = s.play;
         let vol = 0, tp = -1, tone = false, noise = false;
-        if (s.drum) {
-          const d = s.drum, fr = d.macro[d.f];
-          vol = this.quant(this.ampOf[fr[0]] * d.amp * (this.cfg.drumGain || 1));
-          tone = fr[1] !== 2; noise = fr[1] !== 0;
-          if (tone) tp = chip.periodFor(fr[3]);
-          if (noise && 100 > noisePrio) { noisePrio = 100; noiseP = fr[2]; }
-          s.lastKey = -2; s.buzzNote = null;
-          if (vol > 0) { sounding++; if (d.amp > H.meter[d.c]) H.meter[d.c] = d.amp; }
-        } else if (s.req) {
-          const r = s.req, p = r.p;
-          s.lastKey = r.key;
-          // which note does this channel play this frame?
-          let n;
-          if ((p.nv >= p.notes.length && !p.merged.length) || r.k < p.nv - 1) n = p.notes[r.k];
-          else {
-            const start = p.nv - 1, own = p.notes.length - start, cnt = own + p.merged.length;
-            const idx = Math.floor(this.frame / this.arpSpeed) % cnt;
-            n = idx < own ? p.notes[start + idx] : p.merged[idx - own];
-          }
-          const pt = n.patch, ch = H.ch[n.ch], f = n.frames - 1;
-          let semis = n.note + pt.oct * 12 + ch.bend * ch.bendRange;
-          if (pt.arp0 && f < pt.arp0.length) semis += pt.arp0[f];
-          if (pt.loop) semis += pt.loop[f % pt.loop.length];
-          if (pt.sweep) { const sw = pt.sweep * f * this.dt; semis += Math.max(-pt.sweepMax, Math.min(pt.sweepMax, sw)); }
-          const tsec = f * this.dt;
-          if (pt.vib && tsec >= pt.vib[1]) semis += pt.vib[0] * tri(tsec * pt.vib[2]);
-          if (ch.mod) semis += (ch.mod / 127) * 0.5 * tri(tsec * 5.5);
+        s.lvl = 0;
+        if (n) {
+          const I = n.inst, ch = H.ch[n.ch];
+          s.lastKey = s.drum ? -2 : s.req.key;
+          s.ch = n.ch; s.note = n.note; s.idx = n.idx;
+          const semis = notePitch(n, ch, fps);
           const hz = midiHz(semis);
-          let e = n.env.e;
-          if (pt.trem && e > 0) e = Math.max(0, e - pt.trem[0] * 0.5 * (1 + Math.sin(2 * Math.PI * tsec * pt.trem[1])));
-          const a = e <= 0 ? 0 : n.amp * Math.pow(10, (e - 1) * 45 / 20);
-          if (a > H.meter[n.ch]) H.meter[n.ch] = a;
+          const mv = noteVol(n);
+          const a = n.amp * this.ampOf[mv] * (s.drum ? (this.cfg.drumGain || 1) : 1);
           vol = this.quant(a);
-          if (pt.mix === 2) { noise = true; tone = false; }
-          else { tone = true; noise = pt.mix === 1 || f < pt.atkN; }
+          const mx = macroVal(I.mixer, n.im);
+          tone = !!(mx & 1); noise = !!(mx & 2);
+          tp = chip.periodFor(hz) + macroVal(I.pitch, n.ip);
+          tp = tp < 1 ? 1 : tp > 4095 ? 4095 : tp;
           if (noise) {
-            const np = pt.mix === 2 || pt.mix === 1 ? (pt.np < 0 ? noiseForNote(semis) : pt.np) : pt.atkNp;
-            if (p.score > noisePrio) { noisePrio = p.score; noiseP = np; }
+            let np = macroVal(I.noise, n.inz) + (I.noiseRel ? noiseForNote(semis) : 0);
+            np = np < 0 ? 0 : np > 31 ? 31 : np;
+            const pr = s.drum ? 100 : s.req.p.score;
+            if (pr > noisePrio) { noisePrio = pr; noiseP = np; }
           }
-          tp = chip.periodFor(hz);
-          const triB = pt.buzz === 'tri', ep = envOwner[ci] === r ? chip.envPeriodFor(hz, triB) : 0;
-          // the envelope only tunes well at bass pitches: skip it when its period is > 20 cents off
-          if (ep && vol > 0 && Math.abs(1200 * Math.log2(chip.clock / ((triB ? 512 : 256) * ep) / hz)) < 20) {
-            // hardware envelope as the oscillator
-            const shape = triB ? 10 : pt.buzz === 'sync' ? 12 : 8;
-            chip.write(11, ep & 255); chip.write(12, ep >> 8);
-            if (s.buzzNote !== n || n.frames === 1) { chip.write(13, shape); s.buzzNote = n; }
-            vol = 16;
-            if (pt.buzz === 'sync') { tp = Math.min(4095, ep * 16); tone = true; } else tone = false;
-            noise = false;
+          const env = I.env;
+          if (env.shape >= 0 && mv > 0 && !n.rel) {
+            const o = owner[ci];
+            let ep = 0;
+            if (o && o.s === s) {
+              const triS = env.shape === 10 || env.shape === 14;
+              if (env.mode === 'abs') ep = Math.max(1, Math.min(65535, env.period | 0));
+              else {
+                ep = chip.envPeriodFor(hz * (env.ratio || 1), triS);
+                const err = 1200 * Math.log2(chip.clock / ((triS ? 512 : 256) * ep) / (hz * (env.ratio || 1)));
+                if (CONT_SHAPES.has(env.shape) && Math.abs(err) > 25 && !(mx & 1)) ep = 0;   // too far off: plain tone
+              }
+            }
+            if (ep) {
+              chip.write(11, ep & 255); chip.write(12, ep >> 8);
+              if (s.buzzNote !== n) { chip.write(13, env.shape); s.buzzNote = n; }
+              vol = vol > 0 ? 16 : 0;
+              if (env.mode === 'note' && env.shape === 12 && (mx & 1) && env.ratio === 1) tp = Math.min(4095, ep * 16);   // phase-locked sync
+            } else { s.buzzNote = null; if (!tone && !noise) tone = true; }
           } else s.buzzNote = null;
-          if (vol > 0) sounding++;
+          if (vol > 0) { sounding++; s.lvl = vol === 16 ? 1 : this.ampOf[vol]; if (n.cur > H.meter[n.ch]) H.meter[n.ch] = n.amp * this.ampOf[mv]; }
+          if (this.vmute & (1 << s.n)) { vol = 0; s.lvl = 0; }
         } else {
-          s.buzzNote = null;
-          if (s.lastKey !== -1) s.idle = 0;
-          s.lastKey = -1;
+          s.buzzNote = null; s.lastKey = -1; s.ch = -1; s.note = -1; s.idx = -1;
         }
         s.idle = vol > 0 ? 0 : s.idle + 1;
         if (tp >= 0) { chip.write(i * 2, tp & 255); chip.write(i * 2 + 1, tp >> 8); }
@@ -395,7 +448,6 @@ export class AYDriver {
   }
 
   // ------------------------------------------------------------ audio
-  /** Optional per-block extra source (e.g. Apple II speaker), adds into L/R at off. */
   extra(L, R, off, m) {}
   render(L, R, n) {
     L.fill(0, 0, n); R.fill(0, 0, n);
@@ -428,6 +480,3 @@ export class AYDriver {
     this.dcxL = xl; this.dcL = yl; this.dcxR = xr; this.dcR = yr;
   }
 }
-
-const tri = (ph) => { const x = ph - Math.floor(ph); return x < 0.25 ? 4 * x : x < 0.75 ? 2 - 4 * x : 4 * x - 4; };
-

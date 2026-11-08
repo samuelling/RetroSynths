@@ -1,8 +1,11 @@
 // IBM PC speaker — Intel 8253 PIT channel 2 in mode 3 (square wave, 1.193182 MHz ÷ divisor) gated through
-// port 61h into a small speaker cone. Driven like a DOS game's sound routine (see beeper.js): one note at
-// a time by priority (melody > bass > chords), chords as fast arpeggios at the timer-interrupt rate,
-// drums as short pitch-sweep / noise blips that interrupt the tone.
+// port 61h into a small speaker cone. Driven like a DOS game's sound routine (beeper.js): one voice by
+// priority (melody > bass > chords), chords as fast arpeggios at the timer-interrupt rate, drums as short
+// pitch-sweep / noise blips that interrupt the tone. Native instruments: beeper-instruments.js.
 import { OneBitDriver } from './beeper.js';
+import { pcLibrary } from './beeper-instruments.js';
+
+const LIB = pcLibrary();
 
 export default class PCSpeaker extends OneBitDriver {
   static info = {
@@ -13,14 +16,17 @@ export default class PCSpeaker extends OneBitDriver {
   static options = [
     { key: 'rate', label: 'Driver', choices: [[60, '60 Hz'], [120, '120 Hz']], default: 60 },
     { key: 'mode', label: 'Voices', choices: [['priority', 'Priority'], ['multiplex', 'Multiplex']], default: 'priority' },
-    { key: 'volume', label: 'Volume', choices: [['square', 'Square (none)'], ['pwm', 'Pulse width']], default: 'square' },
   ];
+  static voices = [{ id: 'spk', name: 'Speaker', kind: 'speaker' }];
+  static presets = LIB.presets;
+  static gmPreset(program) { return LIB.gmPreset(program); }
+  static gmDrum(note) { return LIB.gmDrum(note); }
+  static chipInfo = { clock: 1193182, timer: 'pit' };
   constructor(host) {
-    super(host, { clock: 1193182, timer: 'pit', gateOff: true, speaker: 'pc', frameHz: 60, volume: 'square', mode: 'priority', gain: 0.25 });
+    super(host, { clock: 1193182, timer: 'pit', gateOff: true, speaker: 'pc', frameHz: 60, mode: 'priority', gain: 0.25, lib: LIB });
   }
   setOption(key, value) {
     if (key === 'rate' && (value === 60 || value === 120)) this.setRate(value);
     else if (key === 'mode' && (value === 'priority' || value === 'multiplex')) this.cfg.mode = value;
-    else if (key === 'volume' && (value === 'square' || value === 'pwm')) this.cfg.volume = value;
   }
 }
