@@ -129,7 +129,7 @@ function renderMachine() {
   plate.querySelector('.p-chip').textContent = pl.chip;
   plate.querySelector('.p-stripe').style.background = pl.stripe;
   plate.querySelector('.p-year').textContent = info.year;
-  $('mName').textContent = `${info.maker} ${info.name}`;
+  $('mName').textContent = info.name.toLowerCase().includes(info.maker.split(/[ /]/)[0].toLowerCase()) ? info.name : `${info.maker} ${info.name}`;
   $('mChip').textContent = `${info.chip} · ${info.year}`;
   $('mSpec').textContent = info.spec || info.voices;
   const box = $('mopts'); box.innerHTML = '';
