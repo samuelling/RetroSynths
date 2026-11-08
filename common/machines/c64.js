@@ -22,10 +22,13 @@
 // Levels: the SID has no per-voice volume, so velocity × CC7 × CC11 scales the sustain level written to
 // the voice (for decaying sounds it shortens the decay); the level is only ever lowered mid-note, since
 // raising the sustain nibble during sustain makes the real envelope fall to zero. Master volume stays at 15.
+//
+// Instruments are native SID instruments (see c64-instruments.js): the Arranger picks one per MIDI channel (or
+// Auto = the GM mapping / drum kit), can pin a channel to Voice 1–3, and the editor changes them live.
 
-import { SID, PAL_CLOCK, NTSC_CLOCK, MAXN, cutoffReg } from './sid.js';
-import { PROGRAMS, drumDef, FAMILY_WEIGHT, SYNC, N as NOISE } from './c64-instruments.js';
-import { family, Resampler, DCBlock } from './util.js';
+import { SID, PAL_CLOCK, NTSC_CLOCK, MAXN } from './sid.js';
+import { PRESETS, gmPreset, gmDrum, normInst, SYNC } from './c64-instruments.js';
+import { Resampler, DCBlock } from './util.js';
 
 const DECIM = 8;
 const SRC = [2, 0, 1];                         // ring/sync source of voice 1, 2, 3
@@ -50,15 +53,15 @@ class MonoResampler extends Resampler {
 class Voice {
   constructor(i) {
     this.i = i; this.key = -1; this.trig = -1; this.phase = IDLE; this.t = 0; this.hrLeft = 0;
-    this.kind = NOTE; this.inst = null; this.drum = null; this.ch = -1; this.note = 60; this.vel = 100;
+    this.kind = NOTE; this.inst = null; this.idx = -1; this.ch = -1; this.note = 60; this.vel = 100;
     this.notes = new Float64Array(16); this.n = 0; this.arpI = 0;
     this.sNib = 0; this.srReg = 0; this.pw = 0x800; this.pwd = 0; this.vibPh = 0; this.slide = 0;
-    this.ctrlReg = 0; this.fn = -1; this.pwReg = -1; this.ft = 0; this.flog = 10; this.k = 1;
+    this.ctrlReg = 0; this.fn = -1; this.pwReg = -1; this.ft = 0; this.fc = 1024; this.k = 1;
     this.win = null; this.borrowed = false; this.hrNew = false;
   }
 }
 class Req {
-  constructor() { this.key = 0; this.trig = 0; this.prio = 0; this.ch = 0; this.kind = NOTE; this.note = 60; this.vel = 100; this.notes = new Float64Array(16); this.n = 0; this.drum = null; this.taken = false; }
+  constructor() { this.key = 0; this.trig = 0; this.prio = 0; this.ch = 0; this.kind = NOTE; this.note = 60; this.vel = 100; this.notes = new Float64Array(16); this.n = 0; this.inst = null; this.idx = -1; this.pin = -1; this.taken = false; }
 }
 
 export default class C64 {
@@ -67,6 +70,14 @@ export default class C64 {
     voices: '3 voices · tri/saw/pulse/noise · analog filter',
     spec: 'SID at 985 kHz: 3 voices, ring/sync, ADSR, multimode filter — 50 Hz player with arps, Hubbard drums, PWM and filter sweeps',
   };
+  static voices = [
+    { id: 'v1', name: 'Voice 1', kind: 'sid' },
+    { id: 'v2', name: 'Voice 2', kind: 'sid' },
+    { id: 'v3', name: 'Voice 3', kind: 'sid' },
+  ];
+  static presets = PRESETS;
+  static gmPreset(program) { return gmPreset(program); }
+  static gmDrum(note) { return gmDrum(note); }
   static options = [
     { key: 'model', label: 'SID', choices: [['6581', '6581 (1982)'], ['8580', '8580 (1987)']], default: '6581' },
     { key: 'video', label: 'Clock', choices: [['pal', 'PAL 985 kHz · 50 Hz'], ['ntsc', 'NTSC 1.02 MHz · 60 Hz']], default: 'pal' },
@@ -84,6 +95,9 @@ export default class C64 {
     this.pend = []; this.prim = null; this.sec = null;
     this.ids = 0; this.onSeq = 0; this.frame = 0; this.leadCh = -1; this.bassCh = -1; this.fOwner = -1; this.leadRest = 99; this.bassRest = 99; this.leadStop = 0; this.leadScore = 0;
     this.fReg = [-1, -1, -1, -1];
+    this.table = PRESETS.map(normInst);
+    this.arr = Array.from({ length: 16 }, () => ({ inst: -1, voice: 'auto' }));
+    this.kit = {}; this.vs = new Float32Array(12);
     this.cnt = new Int32Array(128); this.frac = new Float64Array(128); this.ibuf = new Float64Array(1024);
     this.setVideo('pal');
     this.reset();
@@ -128,10 +142,65 @@ export default class C64 {
     this.leadCh = this.bassCh = this.fOwner = -1; this.fReg.fill(-1); this.leadRest = this.bassRest = 99;
   }
 
+  // ------------------------------------------------------------------ native instruments / Arranger (interface v2)
+  setInstruments(list) {
+    if (!Array.isArray(list) || !list.length) return;
+    this.table = list.map(normInst);
+    for (const v of this.v) if (v.idx >= 0 && this.table[v.idx]) v.inst = this.table[v.idx];
+  }
+  updateInstrument(i, inst) {
+    if (!(i >= 0)) return;
+    const ins = normInst(inst);
+    this.table[i] = ins;
+    for (const v of this.v) if (v.idx === i && v.phase !== IDLE) {      // live: the next frame runs the new tables
+      v.inst = ins;
+      if (v.phase === ON) {
+        const b = v.i * 7, s = this.susNib(ins.s, v.k);
+        v.sNib = s; v.srReg = (s << 4) | ins.r;
+        this.sid.write(b + 5, (ins.a << 4) | ins.d); this.sid.write(b + 6, v.srReg);
+        if (!ins.pwm) v.pw = ins.pw;
+        v.pwd = v.pwd < 0 ? -Math.abs(ins.pwm) : Math.abs(ins.pwm);
+      }
+    }
+  }
+  setArrangement(arr) {
+    if (!Array.isArray(arr)) return;
+    for (let c = 0; c < 16; c++) { const a = arr[c] || {}; this.arr[c] = { inst: Number.isInteger(a.inst) ? a.inst : -1, voice: a.voice || 'auto' }; }
+  }
+  setKit(kit) { this.kit = kit && typeof kit === 'object' ? kit : {}; }
+  setVoiceMute(mask) { this.sid.vmute = mask & 7; }
+  voiceState() {
+    const o = this.vs;
+    for (const v of this.v) {
+      const j = v.i * 4, on = v.phase !== IDLE && v.ch >= 0;
+      o[j] = on && !(this.sid.vmute & (1 << v.i)) ? this.sid.env[v.i] / 255 : 0;
+      o[j + 1] = on ? v.ch : -1; o[j + 2] = on ? Math.round(v.note) : -1; o[j + 3] = on ? v.idx : -1;
+    }
+    return o;
+  }
+  instIdx(c) {
+    const a = this.arr[c].inst;
+    if (a >= 0 && a < this.table.length) return a;
+    const g = gmPreset(this.h.ch[c].program);
+    return g >= 0 && g < this.table.length ? g : 0;
+  }
+  drumIdx(c, n) {
+    const a = this.arr[c].inst;
+    if (a >= 0 && a < this.table.length) return a;
+    const k = this.kit[n];
+    const i = k != null && k >= 0 ? k : gmDrum(n);
+    return i >= 0 && i < this.table.length ? i : -1;
+  }
+  pinOf(c) { const v = this.arr[c].voice; return v === 'v1' ? 0 : v === 'v2' ? 1 : v === 'v3' ? 2 : -1; }
+
   // ------------------------------------------------------------------ MIDI in
   noteOn(c, note, vel) {
     const ch = this.h.ch[c];
-    if (ch.drum) { if (this.pend.length < 16) this.pend.push({ n: note, v: vel, c, id: ++this.ids, t: 0, def: drumDef(note) }); return; }
+    if (ch.drum) {
+      const idx = this.drumIdx(c, note);
+      if (idx >= 0 && this.pend.length < 16) { const ins = this.table[idx]; this.pend.push({ n: note, v: vel, c, id: ++this.ids, t: 0, idx, inst: ins, prio: ins.prio, len: ins.hold }); }
+      return;
+    }
     const cs = this.cs[c], held = cs.held;
     for (let k = held.length - 1; k >= 0; k--) if (held[k].n === note) held.splice(k, 1);
     if (held.length >= 12) held.shift();
@@ -167,15 +236,16 @@ export default class C64 {
   score(c) {
     const ch = this.h.ch[c], held = this.cs[c].held;
     let top = 0; for (const e of held) if (e.n > top) top = e.n;
-    return (FAMILY_WEIGHT[family(ch.program)] || 0) + (held.length === 1 ? 0.8 : 0)
+    return this.table[this.instIdx(c)].weight + (held.length === 1 ? 0.8 : 0)
       + 2 * (ch.vol * ch.expr) / 16129 + (top - 60) / 24;
   }
   playable(c) { return !this.h.ch[c].drum && !this.h.mute[c] && this.cs[c].held.length > 0 && this.h.ch[c].vol * this.h.ch[c].expr > 0; }
-  isBass(c) { return family(this.h.ch[c].program) === 'bass' || this.cs[c].avg < 44; }
+  isBass(c) { return this.table[this.instIdx(c)].isBass || this.cs[c].avg < 44; }
   addReq(key, trig, prio, ch, kind) {
     if (this.nreq >= this.req.length) return null;
     const r = this.req[this.nreq++];
-    r.key = key; r.trig = trig; r.prio = prio; r.ch = ch; r.kind = kind; r.n = 0; r.drum = null; r.taken = false;
+    r.key = key; r.trig = trig; r.prio = prio; r.ch = ch; r.kind = kind; r.n = 0; r.taken = false; r.pin = this.pinOf(ch);
+    if (kind !== DRUM) { r.idx = this.instIdx(ch); r.inst = this.table[r.idx]; }
     return r;
   }
   susNib(s, k) { return s ? Math.max(0, Math.min(15, Math.round(s * Math.pow(Math.min(1.2, k), 0.75)))) : 0; }
@@ -190,15 +260,16 @@ export default class C64 {
       for (let k = held.length - 1; k >= 0; k--) { const e = held[k]; e.age++; if (e.off && e.age > hr + 1) held.splice(k, 1); }
     }
     // drums: advance, then take this frame's new hits
-    if (this.prim && ++this.prim.t >= this.prim.def.len + hr) this.prim = null;
-    if (this.sec && ++this.sec.t >= this.sec.def.len + hr) this.sec = null;
+    const dlen = (d) => d.len + (d.inst.hr ? hr : 0);
+    if (this.prim && ++this.prim.t >= dlen(this.prim)) this.prim = null;
+    if (this.sec && ++this.sec.t >= dlen(this.sec)) this.sec = null;
     if (this.pend.length) {
-      this.pend.sort((a, b) => a.def.prio - b.def.prio);
+      this.pend.sort((a, b) => a.prio - b.prio);
       for (const p of this.pend) {
         if (h.mute[p.c]) continue;
         const pr = this.prim;
-        if (!pr || p.def.prio >= pr.def.prio || pr.t >= 2) { if (pr && (!this.sec || pr.def.prio >= this.sec.def.prio)) this.sec = pr; this.prim = p; }
-        else if (!this.sec || p.def.prio >= this.sec.def.prio) this.sec = p;
+        if (!pr || p.prio >= pr.prio || pr.t >= 2) { if (pr && (!this.sec || pr.prio >= this.sec.prio)) this.sec = pr; this.prim = p; }
+        else if (!this.sec || p.prio >= this.sec.prio) this.sec = p;
       }
       this.pend.length = 0;
     }
@@ -240,8 +311,8 @@ export default class C64 {
       for (const e of this.cs[bass].held) if (!bassNote || e.n < bassNote.n) bassNote = e;
       if (this.level(bass, bassNote.v) > 0.004) { const r = this.addReq(K_BASS, bassNote.id, 90, bass, NOTE); r.note = bassNote.n; r.vel = bassNote.v; }
     }
-    if (this.prim) { const r = this.addReq(K_DRUM, this.prim.id, 80, this.prim.c, DRUM); r.drum = this.prim; r.vel = this.prim.v; r.note = this.prim.n; }
-    if (this.sec) { const r = this.addReq(K_DRUM2, this.sec.id, 40, this.sec.c, DRUM); r.drum = this.sec; r.vel = this.sec.v; r.note = this.sec.n; }
+    if (this.prim) { const d = this.prim, r = this.addReq(K_DRUM, d.id, 80, d.c, DRUM); r.inst = d.inst; r.idx = d.idx; r.vel = d.v; r.note = d.n; }
+    if (this.sec) { const d = this.sec, r = this.addReq(K_DRUM2, d.id, 40, d.c, DRUM); r.inst = d.inst; r.idx = d.idx; r.vel = d.v; r.note = d.n; }
     for (let c = 0; c < 16; c++) {
       if (!this.playable(c)) continue;
       const held = this.cs[c].held;
@@ -268,8 +339,13 @@ export default class C64 {
     for (let k = 0; k < this.nreq; k++) ord.push(this.req[k]);
     for (let k = 0; k < this.nreq; k++) { const r = this.req[k]; if (r.key >= 100) for (const v of this.v) if (v.key === r.key && v.phase === ON) r.prio += 1; }
     ord.sort((a, b) => b.prio - a.prio);
-    if (ord.length > 3) ord.length = 3;
     for (const v of this.v) v.win = null;
+    // channels pinned to a voice in the Arranger get that voice first; the others share what is left, by priority
+    let nfree = 3;
+    for (const r of ord) if (r.pin >= 0 && !this.v[r.pin].win) { this.v[r.pin].win = r; r.taken = true; nfree--; }
+    let w = 0;
+    for (let k = 0; k < ord.length; k++) { const r = ord[k]; if (r.pin < 0 && w < nfree) ord[w++] = r; }
+    ord.length = w;
     for (const r of ord) for (const v of this.v) if (!v.win && v.key === r.key && (r.kind === HOLD || (v.phase !== IDLE && v.phase !== REL))) { v.win = r; r.taken = true; break; }
     for (const r of ord) {
       if (r.taken || r.kind === HOLD) continue;
@@ -282,8 +358,11 @@ export default class C64 {
         if (r.key === K_DRUM && v.i === 2) s += 0.5;        // drums like voice 3, as in most players
         if (s > bs) { bs = s; best = v; }
       }
-      best.win = r; r.taken = true;
+      if (best) { best.win = r; r.taken = true; }
     }
+    ord.length = 0;                                        // this frame's winners in priority order
+    for (const v of this.v) if (v.win) ord.push(v.win);
+    ord.sort((a, b) => b.prio - a.prio);
     for (const v of this.v) v.borrowed = false;
 
     // ---- per voice: start, follow or release
@@ -294,8 +373,8 @@ export default class C64 {
         if (v.key !== r.key || v.trig !== r.trig || v.phase === REL || v.phase === IDLE) this.start(v, r);
         else if (r.kind === ARP) { v.n = r.n; v.notes.set(r.notes.subarray(0, r.n)); }
         if (r.kind !== DRUM && v.phase === ON) {         // CC7/CC11/velocity: only ever lower the sustain level
-          const k = this.level(v.ch, r.vel) / REF_LEVEL, s = this.susNib(v.inst.sr >> 4, k);
-          if (s < v.sNib) { v.sNib = s; v.srReg = (s << 4) | (v.inst.sr & 15); this.sid.write(v.i * 7 + 6, v.srReg); }
+          const k = this.level(v.ch, r.vel) / REF_LEVEL, s = this.susNib(v.inst.s, k);
+          if (s < v.sNib) { v.sNib = s; v.srReg = (s << 4) | v.inst.r; this.sid.write(v.i * 7 + 6, v.srReg); }
         }
       } else if (v.phase === ON || v.phase === HR) this.release(v);
     }
@@ -304,13 +383,13 @@ export default class C64 {
     // ---- filter owner: highest-priority sounding voice whose instrument wants the filter
     // (kept while its voice still sounds — even in release — unless a higher-priority part wants it)
     let owner = -1, cp = -1;
-    for (const r of ord) for (const v of this.v) if (v.win === r && r.kind !== HOLD && v.phase === ON && v.inst && v.inst.f && owner < 0) { owner = v.i; cp = r.prio; }
+    for (const r of ord) for (const v of this.v) if (v.win === r && r.kind !== HOLD && v.phase === ON && v.inst && v.inst.fon && owner < 0) { owner = v.i; cp = r.prio; }
     const fo = this.fOwner >= 0 ? this.v[this.fOwner] : null;
-    if (fo && fo.phase !== IDLE && fo.inst && fo.inst.f && owner !== fo.i) {
+    if (fo && fo.phase !== IDLE && fo.inst && fo.inst.fon && owner !== fo.i) {
       const op = fo.win && fo.win.kind !== HOLD && fo.phase === ON ? fo.win.prio : fo.phase === HR ? 1e9 : 0;
       if (owner < 0 || cp <= op || fo.phase === HR) owner = fo.i;
     }
-    if (owner !== this.fOwner && owner >= 0) { const v = this.v[owner]; if (v.t > 0) { v.ft = 0; v.flog = Math.log2(v.inst.f0); } }
+    if (owner !== this.fOwner && owner >= 0) { const v = this.v[owner]; if (v.t > 0) { v.ft = 0; v.fc = v.inst.fcut; } }
     this.fOwner = owner;
 
     for (const v of this.v) if (v.phase === ON || v.phase === REL) this.update(v);
@@ -320,36 +399,24 @@ export default class C64 {
   start(v, r) {
     v.key = r.key; v.trig = r.trig; v.ch = r.ch; v.kind = r.kind; v.note = r.note; v.vel = r.vel;
     v.n = r.n; if (r.n) v.notes.set(r.notes.subarray(0, r.n));
-    v.drum = r.kind === DRUM ? r.drum.def : null;
-    v.inst = r.kind === DRUM ? null : PROGRAMS[this.h.ch[r.ch].program & 127];
-    if (this.hr) {
+    v.inst = r.inst; v.idx = r.idx;
+    const hr = v.inst.hr ? this.hr : 0;
+    if (hr) {
       const b = v.i * 7;
       this.sid.write(b + 5, 0x00); this.sid.write(b + 6, 0x00);
       v.ctrlReg &= 0xfe; this.sid.write(b + 4, v.ctrlReg);
-      v.phase = HR; v.hrLeft = this.hr; v.hrNew = true;
+      v.phase = HR; v.hrLeft = hr; v.hrNew = true;
     } else this.trigger(v);
   }
   trigger(v) {
-    const b = v.i * 7, sid = this.sid;
+    const b = v.i * 7, sid = this.sid, ins = v.inst;
     const k = this.level(v.ch, v.vel) / REF_LEVEL; v.k = k;
-    let ad, sr;
-    if (v.drum) {
-      const d = v.drum;
-      const dn = Math.max(0, (d.ad & 15) - (k < 0.6 ? 1 : 0) - (k < 0.3 ? 1 : 0));
-      ad = (d.ad & 0xf0) | dn; sr = d.sr;
-      v.pw = 0x800; v.pwd = 0;
-    } else {
-      const ins = v.inst;
-      const s = this.susNib(ins.sr >> 4, k);
-      v.sNib = s; sr = (s << 4) | (ins.sr & 15);
-      ad = ins.ad;
-      if (!s) ad = (ad & 0xf0) | Math.max(0, (ad & 15) - (k < 0.6 ? 1 : 0) - (k < 0.3 ? 1 : 0));
-      v.pw = ins.pw; v.pwd = ins.pwm;
-      v.ft = 0; v.flog = Math.log2(ins.f0);
-    }
-    v.srReg = sr;
-    sid.write(b + 5, ad); sid.write(b + 6, sr);
+    const s = this.susNib(ins.s, k);
+    const d = s ? ins.d : Math.max(0, ins.d - (k < 0.6 ? 1 : 0) - (k < 0.3 ? 1 : 0));   // decaying sounds: softer = shorter
+    v.sNib = s; v.srReg = (s << 4) | ins.r;
+    sid.write(b + 5, (ins.a << 4) | d); sid.write(b + 6, v.srReg);
     if (v.ctrlReg & 1) { v.ctrlReg &= 0xfe; sid.write(b + 4, v.ctrlReg); }
+    v.pw = ins.pw; v.pwd = ins.pwm; v.ft = 0; v.fc = ins.fcut;
     v.phase = ON; v.t = 0; v.arpI = 0; v.vibPh = 0; v.slide = 0;
   }
   release(v) {
@@ -357,49 +424,41 @@ export default class C64 {
     if (v.ctrlReg & 1) { v.ctrlReg &= 0xfe; this.sid.write(v.i * 7 + 4, v.ctrlReg); }
   }
 
-  /** one frame of wave table / pitch / pulse-width work for a voice, written to its registers */
+  /** one frame of the instrument's wave / pulse / pitch tables for a voice, written to its registers */
   update(v) {
-    const sid = this.sid, b = v.i * 7, t = v.t, ch = this.h.ch[v.ch];
-    let wave, n, gate = v.phase === ON;
-    if (v.drum) {
-      const d = v.drum, L = d.seq.length, e = d.seq[t < L ? t : L - 1];
-      wave = e[0]; n = e[1] + (t >= L - 1 ? (t - L + 1) * d.slide : 0);
-      if (e.length > 2) v.pw = e[2];
-      if (t >= d.g) gate = false;
-    } else {
-      const ins = v.inst;
-      let base = v.note, fix = -1;
-      wave = ins.w;
-      if (v.kind === ARP && v.n) { base = v.notes[v.arpI % v.n]; v.arpI++; }
-      if (ins.arp) base += ins.arp[t % ins.arp.length];
-      if (t < ins.at.length) { const e = ins.at[t]; wave = e[0]; if (e[2] >= 0) fix = e[2]; else base += e[1]; }
-      else if (ins.nfix >= 0 && (wave & NOISE)) fix = ins.nfix + (v.note - 60) * 0.25;
-      v.slide += ins.slide; if (v.slide > ins.smax) v.slide = ins.smax; else if (v.slide < -ins.smax) v.slide = -ins.smax;
-      let vib = 0;
-      const depth = (t >= ins.vdl ? ins.vib : 0) + ch.mod / 127 * 0.6;
-      if (depth > 0) {
-        v.vibPh += ins.vhz / this.frameHz; if (v.vibPh >= 1) v.vibPh -= 1;
-        vib = depth * (v.vibPh < 0.5 ? 4 * v.vibPh - 1 : 3 - 4 * v.vibPh);
-      }
-      n = fix >= 0 ? fix : base + ins.oct * 12 + ch.bend * ch.bendRange + v.slide + vib;
-      if (ins.gate && t >= ins.gate) gate = false;
-      if (ins.chop && t % ins.chop === ins.chop - 1) gate = false;
-      // ring / sync need the source voice's oscillator: only borrow it if that voice is silent
-      if (ins.mod && wave === ins.w) {
-        const sv = this.v[SRC[v.i]];
-        if (!sv.win && sv.phase === IDLE) {
-          const ratio = ins.mod + (ins.modTo - ins.mod) * Math.min(1, t / ins.modFr);
-          const off = 12 * Math.log2(ratio);
-          let sn = n;
-          if (wave & SYNC) n += off; else sn += off;
-          this.setFreq(sv, sn); sv.borrowed = true;
-        } else wave = ins.fw;
-      }
+    const sid = this.sid, b = v.i * 7, t = v.t, ch = this.h.ch[v.ch], ins = v.inst;
+    let base = v.note;
+    if (v.kind === ARP && v.n) { base = v.notes[v.arpI % v.n]; v.arpI++; }
+    const W = ins.wave, L = W.length;
+    const e = W[t < L ? t : ins.loop >= 0 ? ins.loop + (t - L) % (L - ins.loop) : L - 1];
+    let wave = e[0] & 0xfe;
+    const gate = v.phase === ON && (e[0] & 1) && !(ins.gateOff && t >= ins.gateOff);
+    if (t >= ins.sdl) { v.slide += ins.slide; if (v.slide > ins.smax) v.slide = ins.smax; else if (v.slide < -ins.smax) v.slide = -ins.smax; }
+    let vib = 0;
+    const depth = (t >= ins.vdl ? ins.vib : 0) + ch.mod / 127 * 0.6;
+    if (depth > 0) {
+      v.vibPh += ins.vhz / this.frameHz; if (v.vibPh >= 1) v.vibPh -= 1;
+      vib = depth * (v.vibPh < 0.5 ? 4 * v.vibPh - 1 : 3 - 4 * v.vibPh);
+    }
+    let n = e[2] ? e[1] + v.slide : base + e[1] + ins.oct + ch.bend * ch.bendRange + v.slide + vib;
+    // ring / sync need the source voice's oscillator: only borrow it if that voice is silent
+    if (wave & 6) {
+      const sv = this.v[SRC[v.i]];
+      if (!sv.win && sv.phase === IDLE) {
+        const ratio = ins.mod + (ins.modTo - ins.mod) * Math.min(1, t / ins.modFr);
+        const off = 12 * Math.log2(ratio);
+        let sn = n;
+        if (wave & SYNC) n += off; else sn += off;
+        this.setFreq(sv, sn); sv.borrowed = true;
+      } else wave &= ~6;
+    }
+    if (ins.pwm) {
       v.pw += v.pwd;
-      if (v.pw > ins.pwhi) { v.pw = ins.pwhi; v.pwd = -v.pwd; } else if (v.pw < ins.pwlo) { v.pw = ins.pwlo; v.pwd = -v.pwd; }
+      const lo = Math.min(ins.pwlo, ins.pwhi), hi = Math.max(ins.pwlo, ins.pwhi);
+      if (v.pw > hi) { v.pw = hi; v.pwd = -Math.abs(v.pwd); } else if (v.pw < lo) { v.pw = lo; v.pwd = Math.abs(v.pwd); }
     }
     this.setFreq(v, n);
-    const pw = v.pw & 0xfff;
+    const pw = Math.round(v.pw) & 0xfff;
     if (pw !== v.pwReg) { v.pwReg = pw; sid.write(b + 2, pw & 255); sid.write(b + 3, pw >> 8); }
     const cr = wave | (gate ? 1 : 0);
     if (cr !== v.ctrlReg) { v.ctrlReg = cr; sid.write(b + 4, cr); }
@@ -414,16 +473,15 @@ export default class C64 {
   updFilter() {
     const sid = this.sid, f = this.fReg;
     let fc = f[0], rf = 0, mv = 0x0f;
-    if (this.fOwner >= 0) {
+    if (this.fOwner >= 0) {                              // filter table, in 11-bit cutoff register units
       const v = this.v[this.fOwner], ins = v.inst;
-      let lh;
-      if (v.ft < ins.fa) { const a = Math.log2(ins.f0), z = Math.log2(ins.f1); lh = a + (z - a) * v.ft / ins.fa; v.flog = lh; }
-      else { v.flog += (Math.log2(ins.f2) - v.flog) * ins.fk; lh = v.flog; }
-      lh += ins.fkt * (v.note - 60) / 12 + 0.5 * (Math.min(1.3, v.k) - 1);
-      if (ins.fld) lh += ins.fld * Math.sin(2 * Math.PI * ins.fl * v.ft / this.frameHz);
+      if (v.ft < ins.fatk) v.fc = ins.fcut + (ins.fpeak - ins.fcut) * v.ft / ins.fatk;
+      else v.fc += (ins.fend - v.fc) * ins.frate;
+      let c = v.fc + ins.ftrack * (v.note - 60) / 12 + ins.fvel * (Math.min(1.3, v.k) - 1);
+      if (ins.flfoD) c += ins.flfoD * Math.sin(2 * Math.PI * ins.flfo * v.ft / this.frameHz);
       v.ft++;
-      fc = cutoffReg(this.model, Math.pow(2, lh));
-      rf = (ins.res << 4) | (1 << v.i); mv = ins.f | 0x0f;
+      fc = Math.max(0, Math.min(2047, Math.round(c)));
+      rf = (ins.res << 4) | (1 << v.i); mv = ins.fmode | 0x0f;
     }
     if (fc !== f[0]) { f[0] = fc; sid.write(21, fc & 7); sid.write(22, fc >> 3); }
     if (rf !== f[1]) { f[1] = rf; sid.write(23, rf); }

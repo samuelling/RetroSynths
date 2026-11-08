@@ -59,6 +59,9 @@ export function cutoffReg(model, hz) {
   return lo;
 }
 
+/** Filter Q for a 4-bit resonance value (same mapping the emulation uses). */
+export const filterQ = (model, r) => model === '8580' ? 0.707 * Math.pow(2, r / 7.8) : 0.707 + r * 0.13;
+
 export class SID {
   constructor(clock = PAL_CLOCK, model = '6581') {
     this.acc = new Int32Array(3); this.freq = new Int32Array(3); this.pw = new Int32Array(3);
@@ -72,7 +75,7 @@ export class SID {
     this.accBuf = [0, 1, 2].map(() => new Int32Array(MAXN));
     this.riseBuf = [0, 1, 2].map(() => new Uint8Array(MAXN));
     this.reg = new Uint8Array(32);
-    this.adsrBug = true;
+    this.adsrBug = true; this.vmute = 0;
     this.w = new Float64Array(2048); this.damp = new Float64Array(16);
     this.setClock(clock); this.setModel(model);
     this.reset();
@@ -91,8 +94,7 @@ export class SID {
     const f = this.model === '6581' ? cutoff6581 : cutoff8580;
     for (let i = 0; i < 2048; i++) this.w[i] = 2 * Math.sin(Math.PI * Math.min(f(i), 20000) / this.clock);
     for (let r = 0; r < 16; r++) {
-      const q = this.model === '6581' ? 0.707 + r * 0.13 : 0.707 * Math.pow(2, r / 7.8);
-      this.damp[r] = 1 / q;
+      this.damp[r] = 1 / filterQ(this.model, r);
     }
     this.updFilter();
   }
@@ -237,8 +239,9 @@ export class SID {
   mix(n) {
     const filt = this.filt, mode = this.mode, kV = 1 / (2048 * 255);
     const off3 = (mode & 0x80) && !(filt & 4);
-    const f0 = filt & 1 ? kV : 0, f1 = filt & 2 ? kV : 0, f2 = filt & 4 ? kV : 0;
-    const d0 = filt & 1 ? 0 : kV, d1 = filt & 2 ? 0 : kV, d2 = (filt & 4) || off3 ? 0 : kV;
+    const vm = this.vmute, k0 = vm & 1 ? 0 : kV, k1 = vm & 2 ? 0 : kV, k2 = vm & 4 ? 0 : kV;   // monitor mute (emulator-style)
+    const f0 = filt & 1 ? k0 : 0, f1 = filt & 2 ? k1 : 0, f2 = filt & 4 ? k2 : 0;
+    const d0 = filt & 1 ? 0 : k0, d1 = filt & 2 ? 0 : k1, d2 = (filt & 4) || off3 ? 0 : k2;
     const gl = mode & 0x10 ? 1 : 0, gb = mode & 0x20 ? 1 : 0, gh = mode & 0x40 ? 1 : 0;
     const v0 = this.vbuf[0], v1 = this.vbuf[1], v2 = this.vbuf[2], ob = this.obuf, dec = this.dec, inv = 1 / dec;
     const wc = this.wc, dmp = this.dmp, sat = this.sat, gain = this.vol / 15, dc = this.mixDC * gain;
@@ -249,7 +252,7 @@ export class SID {
       for (let j = 0, c = 0; c < n; j++) {
         let sum = 0;
         for (let k = 0; k < dec; k++, c++) {
-          const out = (v0[c] + v1[c] + (off3 ? 0 : v2[c])) * kV * gain + dc;
+          const out = (v0[c] * k0 + v1[c] * k1 + (off3 ? 0 : v2[c] * k2)) * gain + dc;
           olp += lpA * (out - olp); oaa += aaA * (olp - oaa);
           sum += oaa;
         }

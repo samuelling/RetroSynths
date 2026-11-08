@@ -1,7 +1,29 @@
-// Commodore 64 driver instruments: 128 GM programs + GM drum kit, designed for RetroSynths in the style of
-// mid-80s C64 game music engines (wave tables, PWM, filter sweeps, Hubbard-style drums). Original designs.
+import { cutoffReg } from './sid.js';
+
+// Commodore 64 native instruments (GoatTracker-style) + the GM → instrument mapping. Original designs for RetroSynths
+// in the style of mid-80s C64 game music engines: wave tables, PWM, filter sweeps, Hubbard-style drums.
 //
-// Instrument fields (all optional except w/ad/sr):
+// The library below was first written in a compact authoring form (OLD / DRUMS) and is converted at load time
+// into the native instrument format the driver, the Arranger and the editor use:
+//
+//   { name, category, kind: 'sid',
+//     a, d, s, r          SID envelope nibbles 0–15 (attack 2 ms … 8 s, decay/release 6 ms … 24 s, sustain × 17)
+//     hr                  1 = hard restart (gate off + ADSR $00 for two frames before the note, when the ADSR bug is on)
+//     gateOff             frames after which the gate is released (0 = hold until note-off)
+//     wave, loop          wave table, one row per frame: [control bits, note, abs]. Control = $10 tri | $20 saw | $40 pulse
+//                         | $80 noise | $04 ring | $02 sync | $01 gate. note = semitones relative to the key, or a fixed MIDI
+//                         note when abs = 1. After the last row the table jumps to row `loop` (−1 = stay on the last row)
+//     pulse               { width 0–4095 (12-bit), speed (added per frame), lo, hi (bounce limits) }
+//     filter              { route 0/1, mode $10 LP | $20 BP | $40 HP, res 0–15, cut → peak (11-bit cutoff register)
+//                           over atk frames, then towards end by `rate` per frame; track = register units per octave of
+//                           key; vel = register units for full velocity; lfo (Hz) / lfoDepth (register units) }
+//     vib                 { depth (cents), delay (frames), rate (Hz) }
+//     slide               { speed (semitones / frame), limit (semitones), delay (frames) }
+//     src                 { ratio, to, frames } tuning of the ring / sync source voice relative to the note (swept)
+//     transpose           semitones
+//     drum                { prio 1–5 (who wins a clash on the drum voice), hold (frames it keeps the voice) } }
+//
+// Authoring-form fields (OLD, all optional except w/ad/sr):
 //   w        main waveform bits ($10 tri, $20 saw, $40 pulse, $80 noise; $04 ring, $02 sync), no gate bit
 //   ad, sr   SID attack/decay and sustain/release register values
 //   pw       initial 12-bit pulse width; pwm = change per frame (bounces between pwlo and pwhi)
@@ -34,7 +56,7 @@ function I(w, ad, sr, x = {}) {
   return o;
 }
 
-export const PROGRAMS = [
+const OLD = [
   // --- piano 0-7
   I(P, 0x0a, 0x39, { pw: 0x500, pwm: 12, pwlo: 0x300, pwhi: 0x900, at: [[S, 0]] }),
   I(P, 0x0a, 0x49, { pw: 0x300, pwm: 16, pwlo: 0x200, pwhi: 0x700, at: [[S, 12]] }),
@@ -189,7 +211,7 @@ const D = (seq, ad, sr, g, len, prio, x = {}) => ({ seq, ad, sr, g, len, prio, s
 const tom = (n) => D([[N, 92], [P, n + 14], [T, n + 12], [T, n + 11]], 0x08, 0x00, 6, 8, 3, { slide: -0.5 });
 const conga = (n) => D([[P, n + 12], [T, n + 5], [T, n + 4]], 0x06, 0x00, 3, 5, 2, { slide: -0.3 });
 
-export const DRUMS = {
+const DRUMS = {
   35: D([[N, 94], [P, 55], [P, 47], [T, 42], [T, 38], [T, 35], [T, 33], [T, 31]], 0x08, 0x00, 6, 7, 5),
   36: D([[N, 98], [P, 58], [P, 50], [T, 45], [T, 40], [T, 37], [T, 35], [T, 33]], 0x08, 0x00, 6, 7, 5),
   37: D([[N, 100], [T, 84]], 0x03, 0x00, 2, 3, 3),
@@ -231,8 +253,188 @@ export const DRUMS = {
   82: D([[N, 106]], 0x03, 0x00, 1, 2, 1),
 };
 const PERC = D([[N, 96], [T, 70], [T, 66]], 0x06, 0x00, 3, 4, 1, { slide: -0.4 });
-export const drumDef = (n) => DRUMS[n] || (n < 35 ? DRUMS[n % 2 ? 37 : 75] || PERC : PERC);
 
-/** Melody weight per GM family when choosing which part gets the lead voice. */
-export const FAMILY_WEIGHT = { piano: 1.5, chromatic: 1.0, organ: 1.4, guitar: 1.6, bass: -2, strings: 1.1, ensemble: 0.6,
-  brass: 2.0, reed: 2.2, pipe: 2.2, lead: 3.0, pad: 0.3, fx: 0.4, ethnic: 1.5, percussive: 0.6, sfx: 0.1 };
+
+// ---------------------------------------------------------------- conversion to the native format
+const reg = (hz) => cutoffReg('6581', hz);                  // presets are voiced for the 6581 (the default model)
+const slope = (hz) => Math.max(40, reg(hz * Math.SQRT2) - reg(hz / Math.SQRT2));   // register units per octave there
+const gcd = (a, b) => b ? gcd(b, a % b) : a;
+
+function fromOld(o, name, category, extra = {}) {
+  const wave = [];
+  for (const e of o.at) wave.push(e[2] >= 0 ? [e[0] | 1, e[2], 1] : [e[0] | 1, e[1], 0]);
+  const loopAt = wave.length;
+  const al = o.arp ? o.arp.length : 1, ch = o.chop || 1, P = al * ch / gcd(al, ch);
+  for (let k = 0; k < P; k++) {
+    const gate = o.chop && k % o.chop === o.chop - 1 ? 0 : 1;
+    if (o.nfix >= 0 && (o.w & N)) wave.push([o.w | gate, o.nfix - 60, 0]);
+    else wave.push([o.w | gate, o.arp ? o.arp[k % al] : 0, 0]);
+  }
+  const f = o.f ? { route: 1, mode: o.f, res: o.res, cut: reg(o.f0), peak: reg(o.f1), atk: o.fa, end: reg(o.f2), rate: o.fk,
+    track: Math.round(o.fkt * slope(o.f2)), vel: Math.round(0.5 * slope(o.f2)), lfo: o.fl, lfoDepth: Math.round(o.fld * slope(o.f0)) }
+    : { route: 0, mode: LP, res: 0, cut: 1024, peak: 1024, atk: 0, end: 1024, rate: 0.12, track: 0, vel: 0, lfo: 0, lfoDepth: 0 };
+  return {
+    name, category, kind: 'sid',
+    a: o.ad >> 4, d: o.ad & 15, s: o.sr >> 4, r: o.sr & 15, hr: 1, gateOff: o.gate,
+    wave, loop: P > 1 ? loopAt : -1,
+    pulse: { width: o.pw, speed: o.pwm, lo: o.pwlo, hi: o.pwhi },
+    filter: f,
+    vib: { depth: Math.round(o.vib * 100), delay: o.vdl, rate: o.vhz },
+    slide: { speed: o.slide, limit: o.smax, delay: 0 },
+    src: { ratio: o.mod || 1, to: o.modTo || o.mod || 1, frames: o.modFr },
+    transpose: o.oct * 12,
+    drum: { prio: 1, hold: 12 },
+    ...extra,
+  };
+}
+/** Drum sequence → native instrument. relTo: tonal rows become relative to that key (so one preset covers a set of pitches). */
+function fromDrum(d, name, relTo = -1) {
+  const L = d.seq.length, n = Math.max(L, d.g + 1), wave = [];
+  let pw = 0x800;
+  for (let t = 0; t < n; t++) {
+    const e = d.seq[t < L ? t : L - 1];
+    if (e.length > 2 && t < L) pw = e[2];
+    const rel = relTo >= 0 && !(e[0] & N);
+    wave.push([e[0] | (t < d.g ? 1 : 0), rel ? e[1] - relTo : e[1], rel ? 0 : 1]);
+  }
+  return {
+    name, category: 'Drums', kind: 'sid',
+    a: d.ad >> 4, d: d.ad & 15, s: d.sr >> 4, r: d.sr & 15, hr: 1, gateOff: 0,
+    wave, loop: -1,
+    pulse: { width: pw, speed: 0, lo: 0x100, hi: 0xf00 },
+    filter: { route: 0, mode: LP, res: 0, cut: 1024, peak: 1024, atk: 0, end: 1024, rate: 0.12, track: 0, vel: 0, lfo: 0, lfoDepth: 0 },
+    vib: { depth: 0, delay: 0, rate: 5.5 },
+    slide: { speed: d.slide, limit: 48, delay: L },
+    src: { ratio: 1, to: 1, frames: 1 },
+    transpose: 0,
+    drum: { prio: d.prio, hold: d.len },
+  };
+}
+
+// [name, category, authoring program, GM programs mapped to it]
+const MELODIC = [
+  ['Pulse Piano', 'Piano', 0, [0, 1, 3]],
+  ['Saw E.Grand LP', 'Piano', 2, [2]],
+  ['Tri E.Piano', 'Piano', 4, [4]],
+  ['Ring E.Piano', 'Piano', 5, [5]],
+  ['Narrow Pulse Harpsichord', 'Piano', 6, [6]],
+  ['Pulse Clav Sweep', 'Piano', 7, [7]],
+  ['Ring Celesta', 'Chromatic', 8, [8, 112, 114]],
+  ['Ring Glockenspiel', 'Chromatic', 9, [9, 10]],
+  ['Tri Vibes', 'Chromatic', 11, [11]],
+  ['Tri Marimba', 'Chromatic', 12, [12, 31, 108, 113]],
+  ['Noise-Tick Xylophone', 'Chromatic', 13, [13]],
+  ['Ring Tubular Bell', 'Chromatic', 14, [14]],
+  ['Square Organ', 'Organ', 16, [16, 17, 20]],
+  ['Leslie Square Organ', 'Organ', 18, [18]],
+  ['Pulse+Saw Church Organ', 'Organ', 19, [19]],
+  ['PWM Accordion', 'Organ', 21, [21, 23]],
+  ['Tri Nylon Pluck', 'Guitar', 24, [24, 26, 46, 107]],
+  ['PWM Steel Guitar', 'Guitar', 25, [25, 27]],
+  ['Muted Pulse Pluck', 'Guitar', 28, [28, 45]],
+  ['Pulse Banjo', 'Guitar', 105, [15, 105, 106]],
+  ['Sync Overdrive Guitar', 'Guitar', 29, [29, 30]],
+  ['Tri Bass', 'Bass', 32, [32, 35]],
+  ['Finger Bass LP', 'Bass', 33, [33]],
+  ['Saw Pick Bass', 'Bass', 34, [34, 37]],
+  ['Slap Bass Noise Pop', 'Bass', 36, [36]],
+  ['Saw Filter-Sweep Bass', 'Bass', 38, [38, 87]],
+  ['PWM Filter Bass', 'Bass', 39, [39]],
+  ['Saw Violin', 'Strings', 40, [40, 41, 110]],
+  ['Saw Cello', 'Strings', 42, [42, 43]],
+  ['Gate-Chop Tremolo Strings', 'Strings', 44, [44]],
+  ['Noise-Hit Timpani', 'Strings', 47, [47, 116]],
+  ['PWM String Pad', 'Ensemble', 48, [48, 49, 51]],
+  ['Saw Filter Strings', 'Ensemble', 50, [50, 90, 92]],
+  ['Tri&Pulse Choir', 'Ensemble', 52, [52, 53, 91, 94, 99]],
+  ['Resonant Synth Voice', 'Ensemble', 54, [54, 85]],
+  ['Arp Orchestra Hit', 'Ensemble', 55, [55]],
+  ['Saw Trumpet Sweep', 'Brass', 56, [56, 57, 61]],
+  ['Saw Tuba', 'Brass', 58, [58, 60]],
+  ['BP Muted Trumpet', 'Brass', 59, [59]],
+  ['Resonant Synth Brass', 'Brass', 62, [62, 63]],
+  ['Pulse Sax', 'Reed', 64, [22, 64, 65, 66, 67, 109]],
+  ['Narrow Pulse Oboe', 'Reed', 68, [68, 69, 70, 111]],
+  ['Square Clarinet', 'Reed', 71, [71]],
+  ['Tri Flute Chiff', 'Pipe', 73, [72, 73, 74, 78, 79, 82]],
+  ['Noise-Breath Pan Flute', 'Pipe', 75, [75, 76, 77]],
+  ['Square Lead', 'Lead', 80, [80, 83]],
+  ['Saw Lead', 'Lead', 81, [81]],
+  ['Sync Sweep Lead', 'Lead', 84, [84, 101]],
+  ['Fifths Arp Lead', 'Lead', 86, [86]],
+  ['Ring Pad', 'Pad', 88, [88, 93, 96, 98]],
+  ['Warm PWM Pad', 'Pad', 89, [89, 97]],
+  ['Filter-LFO Sweep Pad', 'Pad', 95, [95]],
+  ['HP Saw Shimmer', 'FX', 100, [100]],
+  ['Gate-Echo Pulse', 'FX', 102, [102, 124]],
+  ['Tri Sci-Fi Wobble', 'FX', 103, [103]],
+  ['BP Saw Sitar', 'Ethnic', 104, [104]],
+  ['Reverse Noise Swell', 'SFX', 119, [119]],
+  ['Noise Wind', 'SFX', 121, [121, 122]],
+  ['Tri Bird Chirp', 'SFX', 123, [123]],
+  ['Noise Chopper', 'SFX', 125, [125, 126]],
+  ['Noise Shot', 'SFX', 127, [120, 127]],
+];
+// [name, drum sequence, relTo, GM drum notes]
+const DRUMSET = [
+  ['Hubbard Kick', DRUMS[36], 36, [35, 36]],
+  ['Hubbard Snare', DRUMS[38], -1, [38]],
+  ['Noise E-Snare', DRUMS[40], -1, [40]],
+  ['Noise Clap', DRUMS[39], -1, [39]],
+  ['Noise Closed Hat', DRUMS[42], -1, [42, 44]],
+  ['Noise Open Hat', DRUMS[46], -1, [46]],
+  ['Tri Tom', DRUMS[45], 45, [41, 43, 45, 47, 48, 50]],
+  ['Noise Crash', DRUMS[49], -1, [49, 52, 55, 57]],
+  ['Noise Ride', DRUMS[51], -1, [51, 59]],
+  ['Tri Ping', DRUMS[81], -1, [53, 81]],
+  ['Noise Shaker', DRUMS[54], -1, [54, 58, 69, 70, 73, 74, 82]],
+  ['Pulse Cowbell', DRUMS[56], -1, [56]],
+  ['Tri Conga', DRUMS[62], 62 - 6, [60, 61, 62, 63, 64, 65, 66]],
+  ['Tri Block', DRUMS[76], 76, [37, 67, 68, 75, 76, 77, 80]],
+  ['Tri Whistle', DRUMS[72], -1, [71, 72, 78, 79]],
+  ['Noise Perc', PERC, 60, []],
+];
+
+const PRESETS = [];
+const GM = new Array(128).fill(0), KIT = {};
+for (const [name, cat, prog, gm] of MELODIC) { const i = PRESETS.length; PRESETS.push(fromOld(OLD[prog], name, cat)); for (const g of gm) GM[g] = i; }
+// showcase sounds (not on the GM map)
+PRESETS.push(fromOld(I(P, 0x09, 0xa6, { pw: 0x400, pwm: 24, pwlo: 0x200, pwhi: 0xc00, arp: [0, 4, 7] }), 'Major Chord Arp', 'Lead'));
+PRESETS.push(fromOld(I(P, 0x09, 0x86, { pw: 0x300, pwm: 48, pwlo: 0x200, pwhi: 0xd00, at: [[P, 12], [P, 12]], f: LP, f0: 2500, f2: 600, fk: 0.2, res: 9 }), 'Octave-Pop PWM Bass', 'Bass'));
+const PERC_IDX = PRESETS.length + DRUMSET.length - 1;
+for (const [name, d, rel, notes] of DRUMSET) { const i = PRESETS.length; PRESETS.push(fromDrum(d, name, rel)); for (const n of notes) KIT[n] = i; }
+GM[117] = KIT[45]; GM[118] = KIT[45]; GM[115] = KIT[76];
+
+export { PRESETS };
+export const gmPreset = (program) => GM[program & 127];
+export const gmDrum = (note) => KIT[note] != null ? KIT[note] : note < 35 ? (note % 2 ? KIT[37] : KIT[75]) : PERC_IDX;
+
+const CAT_WEIGHT = { piano: 1.5, chromatic: 1.0, organ: 1.4, guitar: 1.6, bass: -2, strings: 1.1, ensemble: 0.6, brass: 2.0,
+  reed: 2.2, pipe: 2.2, lead: 3.0, pad: 0.3, fx: 0.4, ethnic: 1.5, percussive: 0.6, sfx: 0.1, drums: 0.3 };
+const num = (v, d, lo = -Infinity, hi = Infinity) => { v = +v; return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : d; };
+
+/** Instrument (possibly user-edited, possibly incomplete) → the driver's runtime form, with every field valid. */
+export function normInst(p) {
+  p = p || {};
+  const f = p.filter || {}, pu = p.pulse || {}, vb = p.vib || {}, sl = p.slide || {}, sr = p.src || {}, dr = p.drum || {};
+  let wave = Array.isArray(p.wave) ? p.wave.filter(Array.isArray).slice(0, 64).map(e => [num(e[0], 0x41, 0, 255) | 0, num(e[1], 0, -96, 127), e[2] ? 1 : 0]) : [];
+  if (!wave.length) wave = [[0x41, 0, 0]];
+  const cat = String(p.category || '').toLowerCase();
+  return {
+    name: p.name || '', category: p.category || '',
+    a: num(p.a, 0, 0, 15) | 0, d: num(p.d, 9, 0, 15) | 0, s: num(p.s, 0, 0, 15) | 0, r: num(p.r, 0, 0, 15) | 0,
+    hr: p.hr == null ? 1 : p.hr ? 1 : 0, gateOff: num(p.gateOff, 0, 0, 999) | 0,
+    wave, loop: num(p.loop, -1, -1, wave.length - 1) | 0,
+    pw: num(pu.width, 0x800, 0, 4095), pwm: num(pu.speed, 0, -2048, 2048), pwlo: num(pu.lo, 0, 0, 4095), pwhi: num(pu.hi, 4095, 0, 4095),
+    fon: f.route && (f.mode & 0x70) ? 1 : 0, fmode: (f.mode | 0) & 0x70, res: num(f.res, 0, 0, 15) | 0,
+    fcut: num(f.cut, 1024, 0, 2047), fpeak: num(f.peak, num(f.cut, 1024, 0, 2047), 0, 2047), fatk: num(f.atk, 0, 0, 999) | 0,
+    fend: num(f.end, num(f.cut, 1024, 0, 2047), 0, 2047), frate: num(f.rate, 0.12, 0, 1), ftrack: num(f.track, 0, -2047, 2047),
+    fvel: num(f.vel, 0, -2047, 2047), flfo: num(f.lfo, 0, 0, 50), flfoD: num(f.lfoDepth, 0, -2047, 2047),
+    vib: num(vb.depth, 0, 0, 2400) / 100, vdl: num(vb.delay, 0, 0, 999), vhz: num(vb.rate, 5.5, 0, 50),
+    slide: num(sl.speed, 0, -48, 48), smax: num(sl.limit, 24, 0, 96), sdl: num(sl.delay, 0, 0, 999),
+    mod: num(sr.ratio, 1, 0.01, 16), modTo: num(sr.to, num(sr.ratio, 1, 0.01, 16), 0.01, 16), modFr: Math.max(1, num(sr.frames, 1, 1, 9999)),
+    oct: num(p.transpose, 0, -48, 48),
+    prio: num(dr.prio, 1, 0, 9), hold: Math.max(1, num(dr.hold, 12, 1, 999) | 0),
+    weight: CAT_WEIGHT[cat] != null ? CAT_WEIGHT[cat] : 1, isBass: cat === 'bass',
+  };
+}
