@@ -6,6 +6,7 @@ import { GM_NAMES, ERAS } from './gm.js';
 import { Locker, DEFAULT_LOCKER } from './locker.js';
 
 const $ = (id) => document.getElementById(id);
+if (new URLSearchParams(location.search).has('embed')) { document.body.classList.add('embed'); document.getElementById('bootHint').textContent = '▶ Click to power on Blasta'; }
 const BUILTIN_SF2 = '../../soundfonts/GeneralUser-GS.sf2';
 
 let ctx = null, node = null;

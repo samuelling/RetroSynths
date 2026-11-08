@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RetroSynths</title>
+<link rel="stylesheet" href="css/desktop.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 fill=%22%23008080%22/%3E%3Crect x=%222%22 y=%223%22 width=%2212%22 height=%229%22 fill=%22%23c0c0c0%22/%3E%3Crect x=%222%22 y=%223%22 width=%2212%22 height=%222%22 fill=%22%23000080%22/%3E%3C/svg%3E">
+</head>
+<body>
+
+<div id="dos"><pre id="dosText"></pre><span id="cursor">_</span></div>
+<div id="splash" hidden>
+  <div class="splash-box">
+    <div class="splash-logo"><span class="w4">■</span><span class="w4">■</span><span class="w4">■</span><span class="w4">■</span></div>
+    <div class="splash-name">RetroSynths</div>
+    <div class="splash-ver">Version 3.1</div>
+    <div class="splash-fine">A toolbox of retro sound chips · General MIDI through 1977–1998 hardware</div>
+  </div>
+</div>
+
+<div id="desktop">
+  <div class="win" id="progman" style="left:24px; top:20px; width:560px; height:360px;">
+    <div class="tb"><span class="sys" title="Control menu">&#9644;</span><span class="tt">Program Manager</span><span class="tbb min" title="Minimize">&#9660;</span><span class="tbb max" title="Maximize">&#9650;</span></div>
+    <div class="menubar"><span class="menu"><u>F</u>ile</span><span class="menu"><u>O</u>ptions</span><span class="menu"><u>W</u>indow</span><span class="menu" data-open="readme"><u>H</u>elp</span></div>
+    <div class="pm-body">
+      <div class="win group" id="grp">
+        <div class="tb"><span class="sys">&#9644;</span><span class="tt">RetroSynths</span><span class="tbb">&#9660;</span><span class="tbb">&#9650;</span></div>
+        <div class="icons" id="icons"></div>
+      </div>
+      <div class="mini-groups">
+        <div class="mini" title="Coming later"><span class="mini-ico"></span><span>Synthland</span></div>
+        <div class="mini" data-open="readme"><span class="mini-ico"></span><span>Main</span></div>
+        <div class="mini" data-open="readme"><span class="mini-ico"></span><span>Accessories</span></div>
+      </div>
+    </div>
+  </div>
+  <div id="minimized"></div>
+</div>
+
+<div id="exitDlg" class="modal" hidden>
+  <div class="win dlg">
+    <div class="tb"><span class="tt">Exit RetroSynths</span></div>
+    <div class="dlg-body">
+      <div class="dlg-ico">!</div>
+      <div>This will end your RetroSynths session.</div>
+    </div>
+    <div class="dlg-btns"><button class="btn" id="exitOK">OK</button><button class="btn" id="exitCancel">Cancel</button></div>
+  </div>
+</div>
+
+<script type="module" src="shell/desktop.js"></script>
+</body>
+</html>

@@ -1,0 +1,84 @@
+:root {
+  --face: #c0c0c0; --hi: #ffffff; --lo: #808080; --dk: #000000; --title: #000080; --title-off: #ffffff; --desk: #008080;
+  --ui: "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Verdana, "Segoe UI", sans-serif;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
+body { background: var(--desk); font: 12px/1.3 var(--ui); color: #000; -webkit-font-smoothing: none; user-select: none; }
+button { font: inherit; }
+
+/* ---------- DOS + splash ---------- */
+#dos { position: fixed; inset: 0; background: #000; color: #c0c0c0; z-index: 1000; padding: 24px; cursor: pointer;
+  font: 16px/1.35 "Perfect DOS VGA 437", "Lucida Console", "Courier New", monospace; }
+#dos pre { margin: 0; display: inline; white-space: pre-wrap; font: inherit; }
+#cursor { animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+#splash { position: fixed; inset: 0; z-index: 999; background: #000; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.splash-box { background: var(--face); padding: 28px 46px; text-align: center; border: 2px solid #fff; box-shadow: 4px 4px 0 #555; min-width: 320px; }
+.splash-logo { font-size: 30px; line-height: 1; letter-spacing: 2px; transform: skewX(-12deg); }
+.splash-logo .w4:nth-child(1) { color: #e2463b; } .splash-logo .w4:nth-child(2) { color: #3aa84f; }
+.splash-logo .w4:nth-child(3) { color: #2f6fd0; } .splash-logo .w4:nth-child(4) { color: #f2c63a; }
+.splash-name { font: bold 34px "Times New Roman", serif; font-style: italic; margin-top: 6px; }
+.splash-ver { font-size: 14px; margin-top: 2px; }
+.splash-fine { font-size: 11px; color: #404040; margin-top: 14px; }
+
+/* ---------- windows ---------- */
+#desktop { position: fixed; inset: 0; }
+.win { position: absolute; background: var(--face); border: 1px solid var(--dk); display: flex; flex-direction: column;
+  box-shadow: inset 1px 1px var(--hi), inset -1px -1px var(--lo), 0 0 0 3px var(--face), 0 0 0 4px var(--dk); min-width: 180px; min-height: 80px; }
+.win.app { resize: both; overflow: hidden; }
+.tb { height: 20px; flex: none; background: var(--title-off); color: #000; display: flex; align-items: center; cursor: default; touch-action: none; border-bottom: 1px solid var(--dk); }
+.win.active > .tb { background: var(--title); color: #fff; }
+.tt { flex: 1; text-align: center; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; }
+.sys, .tbb { width: 20px; height: 18px; margin: 0 1px; background: var(--face); color: #000; display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: inset 1px 1px var(--hi), inset -1px -1px var(--lo); font-size: 9px; flex: none; cursor: pointer; }
+.sys { font-size: 11px; }
+.menubar { background: #fff; border-bottom: 1px solid var(--dk); padding: 1px 4px; display: flex; gap: 2px; flex: none; }
+.menu { padding: 1px 8px; cursor: pointer; }
+.menu:hover { background: var(--title); color: #fff; }
+.win iframe { flex: 1; border: 0; width: 100%; background: var(--face); display: block; }
+.win.dragging iframe, .win.resizing iframe { pointer-events: none; }
+.win.maxed { left: 0 !important; top: 0 !important; width: 100% !important; height: 100% !important; resize: none; }
+
+/* control menu */
+.sysmenu { position: absolute; z-index: 500; background: #fff; border: 1px solid #000; box-shadow: 2px 2px 0 rgba(0,0,0,.4); padding: 2px 0; min-width: 140px; }
+.sysmenu div { padding: 2px 18px; cursor: pointer; display: flex; justify-content: space-between; gap: 18px; }
+.sysmenu div:hover { background: var(--title); color: #fff; }
+.sysmenu hr { border: 0; border-top: 1px solid #000; margin: 2px 0; }
+
+/* ---------- Program Manager ---------- */
+.pm-body { flex: 1; position: relative; background: #fff; overflow: hidden; }
+.group { left: 10px; top: 10px; right: 10px; bottom: 64px; box-shadow: none; }
+.group > .tb { background: var(--title); color: #fff; }
+.icons { flex: 1; background: #fff; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 6px 4px; padding: 12px 8px; overflow: auto; }
+.icon { width: 92px; display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; padding: 2px; text-align: center; }
+.icon svg { width: 40px; height: 40px; image-rendering: pixelated; shape-rendering: crispEdges; }
+.icon span { padding: 0 3px; line-height: 1.2; }
+.icon.sel span { background: var(--title); color: #fff; outline: 1px dotted #ff0; }
+.icon.off { opacity: .55; }
+.mini-groups { position: absolute; left: 10px; right: 10px; bottom: 6px; height: 52px; display: flex; gap: 14px; }
+.mini { width: 84px; display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer; font-size: 11px; }
+.mini-ico { width: 30px; height: 20px; background: var(--face); border: 1px solid #000; box-shadow: inset 1px 1px #fff, inset -1px -1px #808080; position: relative; }
+.mini-ico::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 5px; background: var(--title); }
+#minimized { position: fixed; left: 8px; bottom: 6px; display: flex; gap: 14px; }
+#minimized .icon span { color: #fff; }
+#minimized .icon.sel span { color: #fff; }
+
+/* ---------- notepad ---------- */
+.notepad { flex: 1; overflow: auto; background: #fff; padding: 6px 8px; font: 13px/1.45 "Lucida Console", "Courier New", monospace; white-space: pre-wrap; user-select: text; }
+
+/* ---------- dialog ---------- */
+.modal { position: fixed; inset: 0; z-index: 800; display: flex; align-items: center; justify-content: center; }
+.win.dlg { position: relative; width: 320px; min-height: 0; }
+.win.dlg > .tb { background: var(--title); color: #fff; }
+.dlg-body { display: flex; gap: 14px; align-items: center; padding: 18px 16px 8px; }
+.dlg-ico { width: 32px; height: 32px; border-radius: 50%; background: #fff; border: 2px solid #000; display: flex; align-items: center; justify-content: center; font: bold 20px serif; flex: none; }
+.dlg-btns { display: flex; gap: 10px; justify-content: center; padding: 8px 0 14px; }
+.btn { background: var(--face); border: 1px solid var(--dk); box-shadow: inset 1px 1px var(--hi), inset -1px -1px var(--lo); padding: 3px 14px; min-width: 70px; cursor: pointer; }
+.btn:active { box-shadow: inset 1px 1px var(--lo), inset -1px -1px var(--hi); }
+
+@media (max-width: 760px) {
+  #progman { left: 0 !important; top: 0 !important; width: 100% !important; height: 100% !important; }
+  .icon { width: 30%; }
+}

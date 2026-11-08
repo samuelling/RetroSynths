@@ -34,6 +34,12 @@ export default class MyMachine {
   setData(data) {}          // optional: receives the result of <id>.prep.js (e.g. a sample RAM image)
   setOption(key, value) {}  // optional: e.g. 'analog' 0..1
 }
+
+// Optional: user-facing switches the app renders under the machine picker.
+MyMachine.options = [
+  { key: 'model', label: 'SID', choices: [['6581', '6581 (1982)'], ['8580', '8580 (1987)']], default: '6581' },
+  { key: 'arp', label: 'Chord arps', choices: [[true, 'On'], [false, 'Off']], default: true },
+];
 ```
 
 ## Conventions
