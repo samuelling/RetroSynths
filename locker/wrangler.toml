@@ -1,0 +1,14 @@
+name = "blasta-locker"
+main = "worker.js"
+compatibility_date = "2026-11-01"
+
+[[r2_buckets]]
+binding = "BANKS"
+bucket_name = "blasta-banks"
+
+[vars]
+# Pages that may talk to the locker (comma-separated). Add your custom domain here if you use one.
+ALLOWED_ORIGINS = "https://samuelling.github.io,http://localhost:8765"
+
+# The password is NOT stored here. Set it once with:
+#   npx wrangler secret put LOCKER_PASSWORD
