@@ -58,6 +58,7 @@ export default class GB {
         start: (n, I) => self.noteStart(n, I),
         step: (n, I, d) => self.noteStep(n, I, d),
         release: (n, I) => self.noteRelease(n, I),
+        only: (I) => (I.kind === 'pulse' && I.sweep && (I.sweep.pace || I.sweep.shift) ? 'p1' : null),   // NR10 exists on CH1 only
         drumHolds: (I) => !!I && (I.kind === 'wave' ? macroLoops(I.lvlMac) : (I.env && I.env.pace === 0 && I.env.vol > 0 && !(I.len > 0))),
       },
     });

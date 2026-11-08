@@ -178,8 +178,8 @@ export class Driver {
         if (held && held < L.length) { let j = 0; for (const n of L) if (n.on || n.sus) L[j++] = n; L.length = j; }
       }
       L.sort((a, b) => b.note - a.note || b.id - a.id);
-      let amp = 0, newest = 1e9, cat = null, nid = -1;
-      for (const n of L) { if (n.amp > amp) amp = n.amp; if (n.t < newest) newest = n.t; if (n.id > nid) { nid = n.id; cat = this.table[n.ii] && this.table[n.ii].category; } }
+      let amp = 0, newest = 1e9, cat = null, nid = -1, NI = null;
+      for (const n of L) { if (n.amp > amp) amp = n.amp; if (n.t < newest) newest = n.t; if (n.id > nid) { nid = n.id; NI = this.table[n.ii]; cat = NI && NI.category; } }
       p.prio = CAT_PRIO[cat] != null ? CAT_PRIO[cat] : 50;
       p.score = p.prio + 40 * amp + (L.length === 1 ? 12 : L.length >= 3 ? -8 : 0) + 30 * Math.max(0, 1 - newest / 30) + (p.had ? 20 : 0) + (p.drum ? 60 : 0);
       p.top = L[0].note; p.low = L[L.length - 1].note;
@@ -187,6 +187,10 @@ export class Driver {
       const a = this.arr[p.c];
       if (a && a.voice && a.voice !== 'auto') {
         const vi = this.voices.findIndex(v => v.id === a.voice);
+        if (vi >= 0 && this.voices[vi].kind === p.kind) p.pin = vi;
+      }
+      if (p.pin < 0 && NI && this.hooks.only) {            // instruments that only one voice of the kind can play (GB sweep → Pulse 1)
+        const id = this.hooks.only(NI), vi = id ? this.voices.findIndex(v => v.id === id) : -1;
         if (vi >= 0 && this.voices[vi].kind === p.kind) p.pin = vi;
       }
       p.had = false;
