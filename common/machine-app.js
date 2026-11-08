@@ -10,18 +10,20 @@ const $ = (id) => document.getElementById(id);
 const GROUP = document.body.dataset.group;
 const IDS = GROUPS[GROUP];
 const APP_NAME = document.body.dataset.title || 'RetroSynths';
-const PREP = new Set(['snes']);                 // machines with a <id>.prep.js main-thread step
+const PREP = new Set(['snes', 'awe32', 'live']); // machines with a <id>.prep.js main-thread step
 const SF2_URL = '../../soundfonts/GeneralUser-GS.sf2';
 const KB_CH = 15;                               // keyboard / MIDI-in plays on MIDI channel 16 with the selected instrument
 const params = new URLSearchParams(location.search);
 const embed = params.has('embed');
 if (embed) document.body.classList.add('embed');
 const clone = (o) => JSON.parse(JSON.stringify(o));
+const EXT_URL = document.body.dataset.ext || '';
+let EXT = null;                                 // app extension module (Blasta: era slider, banks, locker)
 
 let ctx = null, node = null;
 const app = {
   id: params.get('machine') || localStorage.getItem('retrosynths.' + GROUP + '.machine') || IDS[0],
-  midiMute: new Uint8Array(16), voiceMute: 0, voiceSolo: -1, octave: 4,
+  midiMute: new Uint8Array(16), voiceMute: 0, vmuteSet: new Set(), voiceSolo: -1, octave: 4,
   programs: new Array(16).fill(0), drums: new Array(16).fill(false),
 };
 if (!IDS.includes(app.id)) app.id = IDS[0];
@@ -65,7 +67,9 @@ async function initAudio() {
   node.port.onmessage = (e) => onMsg(e.data);
   if (ctx.state !== 'running') await ctx.resume();
   post({ t: 'master', v: +$('vol').value });
+  if (EXT && EXT.beforeAudio) await EXT.beforeAudio();
   await selectMachine(app.id);
+  if (EXT && EXT.afterAudio) await EXT.afterAudio();
   if (!player.song) player.load(demoSong());
 }
 const post = (m, tr) => node && node.port.postMessage(m, tr || []);
@@ -75,10 +79,26 @@ const setStatus = (s) => { $('status').textContent = s; };
 // ------------------------------------------------------------ per-machine state: instrument table, kit, arrangement
 const S = { table: [], kit: {}, arr: [], sel: 0, songKey: 'demo' };
 const nPresets = () => presetsOf(app.id).length;
+const instKey = (id) => 'retrosynths.inst.' + id + (MACHINES[id].bankKey ? '|' + MACHINES[id].bankKey : '');
+/** saved instrument table / kit for any machine (edits keyed by preset name, plus user instruments) */
+function savedTable(id) {
+  const P = presetsOf(id);
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(instKey(id)) || '{}'); } catch { saved = {}; }
+  const table = P.map(p => (saved.edits && saved.edits[p.name]) ? { ...clone(saved.edits[p.name]), name: p.name } : clone(p));
+  for (const u of saved.user || []) table.push({ ...u, user: true });
+  return { table, kit: saved.kit || {}, sel: saved.sel || 0, saved };
+}
+function writeTable(id, table, kit, sel) {
+  const P = presetsOf(id), edits = {};
+  P.forEach((p, i) => { if (table[i] && JSON.stringify(table[i]) !== JSON.stringify(p)) edits[p.name] = table[i]; });
+  try { localStorage.setItem(instKey(id), JSON.stringify({ edits, user: table.slice(P.length), kit, sel })); } catch (err) { setStatus('Could not save instruments: ' + err.message); }
+}
 function loadState() {
   const P = presetsOf(app.id);
+  S.bankKey = MACHINES[app.id].bankKey || '';
   let saved = {};
-  try { saved = JSON.parse(localStorage.getItem('retrosynths.inst.' + app.id) || '{}'); } catch { saved = {}; }
+  try { saved = JSON.parse(localStorage.getItem(instKey(app.id)) || '{}'); } catch { saved = {}; }
   S.table = P.map(p => (saved.edits && saved.edits[p.name]) ? { ...clone(saved.edits[p.name]), name: p.name } : clone(p));
   for (const u of saved.user || []) S.table.push({ ...u, user: true });
   S.kit = saved.kit || {};
@@ -92,10 +112,10 @@ function saveState() {
     const P = presetsOf(app.id), edits = {};
     P.forEach((p, i) => { if (S.table[i] && JSON.stringify(S.table[i]) !== JSON.stringify(p)) edits[p.name] = S.table[i]; });
     const data = { edits, user: S.table.slice(P.length), kit: S.kit, sel: S.sel };
-    try { localStorage.setItem('retrosynths.inst.' + app.id, JSON.stringify(data)); } catch (err) { setStatus('Could not save instruments: ' + err.message); }
+    try { localStorage.setItem(instKey(app.id), JSON.stringify(data)); } catch (err) { setStatus('Could not save instruments: ' + err.message); }
   }, 300);
 }
-const arrKey = () => `retrosynths.arr.${app.id}.${S.songKey}`;
+const arrKey = (id = app.id) => `retrosynths.arr.${id}${MACHINES[id].bankKey ? '|' + MACHINES[id].bankKey : ''}.${S.songKey}`;
 function loadArrangement() {
   let a = null;
   try { a = JSON.parse(localStorage.getItem(arrKey()) || 'null'); } catch { a = null; }
@@ -127,6 +147,7 @@ const fetchSF2 = async () => {
   return sf2Cache.slice(0);
 };
 const prepDone = new Map();
+const delivered = new Set();                    // machines whose prep result already reached this worklet
 let prepBusy = Promise.resolve();
 function songInfo(song) {
   if (!song) return null;
@@ -150,31 +171,52 @@ function usedInstruments(id) {
   }
   return [...used].filter(i => i >= 0 && i < S.table.length).sort((a, b) => a - b);
 }
-async function runPrep(id) {
+async function runPrep(id, force = false) {
   if (!PREP.has(id)) return;
-  const song = player.song, used = usedInstruments(id);
-  const key = (song ? song.title + ':' + song.events.length : 'live') + '|' + used.join(',') + '|' + JSON.stringify(used.map(i => S.table[i]));
+  if (force) prepDone.delete(id);
+  const song = player.song, used = id === app.id ? usedInstruments(id) : [];
+  const key = (song ? song.title + ':' + song.events.length : 'live') + '|' + used.join(',') + '|' + (id === app.id ? JSON.stringify(used.map(i => S.table[i])) : '');
   if (prepDone.get(id) === key) return;
   prepBusy = prepBusy.then(async () => {
     try {
       const mod = await import(`./machines/${id}.prep.js`);
-      setStatus(`Loading ${MACHINES[id].info.name} sample RAM…`);
-      const data = await mod.prepare({ fetchSF2, song: songInfo(song), instruments: S.table, used });
+      if (id === app.id) setStatus(`Loading ${MACHINES[id].info.name} sample RAM…`);
+      const data = await mod.prepare({ fetchSF2, song: songInfo(song), instruments: id === app.id ? S.table : savedTable(id).table, used, delivered: delivered.has(id) });
       post({ t: 'data', id, data }, mod.transfer ? mod.transfer(data) : []);
+      delivered.add(id);
       prepDone.set(id, key);
-      setStatus(`${MACHINES[id].info.name} ready.`);
+      // a machine whose instrument list follows its bank (AWE32 / Live!): the bank changed → reload its table
+      if (MACHINES[id].bankKey != null) {
+        if (id === app.id && S.bankKey !== MACHINES[id].bankKey) { loadState(); renderInstList(); renderArranger(); selectInst(S.sel, true); pushAll(); }
+        else if (id !== app.id) primeMachine(id);
+      }
+      if (id === app.id) setStatus(`${MACHINES[id].info.name} ready.`);
     } catch (err) { setStatus(`${MACHINES[id].info.name}: ${err.message}`); }
   });
   return prepBusy;
 }
-async function selectMachine(id) {
+/** push another machine's saved instruments / kit / arrangement to the worklet (Blasta blends two machines) */
+function primeMachine(id) {
+  if (!node || id === app.id) return;
+  const st = savedTable(id);
+  let a = null;
+  try { a = JSON.parse(localStorage.getItem(arrKey(id)) || 'null'); } catch { a = null; }
+  const arr = Array.from({ length: 16 }, (_, c) => (a && a[c] && c !== KB_CH) ? { inst: a[c].inst < st.table.length ? a[c].inst : -1, voice: a[c].voice || 'auto' } : { inst: -1, voice: 'auto' });
+  arr[KB_CH] = { inst: Math.min(st.sel, st.table.length - 1), voice: 'auto' };
+  post({ t: 'instruments', id, list: st.table });
+  post({ t: 'kit', id, kit: st.kit });
+  post({ t: 'arrangement', id, arr });
+  post({ t: 'voicemute', id, mask: 0 });
+  for (const o of optionsOf(id)) post({ t: 'option', id, key: o.key, value: loadOpt(id, o) });
+}
+async function selectMachine(id, { seamless = false } = {}) {
   app.id = id;
   localStorage.setItem('retrosynths.' + GROUP + '.machine', id);
-  app.voiceMute = 0; app.voiceSolo = -1;
+  app.voiceMute = 0; app.vmuteSet.clear(); app.voiceSolo = -1;
   loadState();
   renderMachine(); buildVoices(); renderArranger(); renderInstList(); selectInst(S.sel, true);
   if (!node) return;
-  const wasPlaying = player.playing;
+  const wasPlaying = player.playing && !seamless;
   if (PREP.has(id)) { if (wasPlaying) player.pause(); await runPrep(id); }
   pushAll();
   post({ t: 'machine', id });
@@ -212,6 +254,7 @@ function renderMachine() {
     lab.append(o.label + ' ', sel); box.appendChild(lab);
   }
   document.querySelectorAll('.mpick button').forEach(b => b.classList.toggle('on', b.dataset.id === app.id));
+  if (EXT && EXT.renderMachine) EXT.renderMachine(app.id);
 }
 (function buildPicker() {
   const box = $('mpick');
@@ -229,19 +272,26 @@ function renderMachine() {
 let vRows = [];
 function effectiveVoiceMute() {
   const n = voicesOf(app.id).length;
+  if (n > 31) {            // wide chips (AWE32 30+, Live! 64): send the muted voice indices
+    const out = [];
+    for (let i = 0; i < n; i++) if (app.voiceSolo >= 0 ? i !== app.voiceSolo : app.vmuteSet.has(i)) out.push(i);
+    return out;
+  }
   if (app.voiceSolo >= 0) return ((1 << n) - 1) & ~(1 << app.voiceSolo);
   return app.voiceMute;
 }
+const isVMuted = (m, i) => (Array.isArray(m) ? m.includes(i) : !!(m & (1 << i)));
 function buildVoices() {
   const box = $('voiceRows'); box.innerHTML = ''; vRows = [];
   const V = voicesOf(app.id);
+  box.classList.toggle('compact', V.length > 18);
   if (!V.length) { box.innerHTML = '<div class="ed-note">This machine does not list its voices yet.</div>'; return; }
   V.forEach((v, i) => {
     const r = document.createElement('div'); r.className = 'vrow';
     r.innerHTML = `<span class="vname"></span><span class="vwhat"></span><span class="mt"><i></i></span>`;
     r.querySelector('.vname').textContent = v.name; r.title = `${v.name} (${v.kind})`;
     let t = 0;
-    r.onclick = () => { clearTimeout(t); t = setTimeout(() => { app.voiceMute ^= (1 << i); applyVoiceMute(); }, 220); };
+    r.onclick = () => { clearTimeout(t); t = setTimeout(() => { if (V.length > 31) { if (app.vmuteSet.has(i)) app.vmuteSet.delete(i); else app.vmuteSet.add(i); } else app.voiceMute ^= (1 << i); applyVoiceMute(); }, 220); };
     r.ondblclick = () => { clearTimeout(t); app.voiceSolo = app.voiceSolo === i ? -1 : i; applyVoiceMute(); };
     box.appendChild(r);
     vRows.push({ el: r, what: r.querySelector('.vwhat'), bar: r.querySelector('i'), lvl: 0 });
@@ -249,7 +299,7 @@ function buildVoices() {
 }
 function applyVoiceMute() {
   const m = effectiveVoiceMute();
-  vRows.forEach((r, i) => { r.el.classList.toggle('muted', !!(m & (1 << i))); r.el.classList.toggle('solo', app.voiceSolo === i); });
+  vRows.forEach((r, i) => { r.el.classList.toggle('muted', isVMuted(m, i)); r.el.classList.toggle('solo', app.voiceSolo === i); });
   post({ t: 'voicemute', id: app.id, mask: m });
 }
 
@@ -304,7 +354,8 @@ function renderArranger() {
     r.querySelector('.gm').textContent = isDrum ? 'Drums' : GM_NAMES[prog];
     const si = r.querySelector('.ai'), sv = r.querySelector('.av');
     const autoIdx = isDrum ? -1 : (M().gmPreset ? safeGM(prog) : -1);
-    instOptions(si, { auto: isDrum ? 'Auto · drum kit' : `Auto · ${instName(autoIdx)}` });
+    const kitIdx = isDrum && M().gmKit ? (() => { try { return M().gmKit(prog); } catch { return -1; } })() : -1;
+    instOptions(si, { auto: isDrum ? (kitIdx >= 0 ? `Auto · ${instName(kitIdx)}` : 'Auto · drum kit') : `Auto · ${instName(autoIdx)}` });
     si.value = S.arr[c].inst;
     const kindNow = () => { const i = S.arr[c].inst >= 0 ? S.arr[c].inst : autoIdx; return i >= 0 && S.table[i] ? S.table[i].kind : null; };
     voiceOptions(sv, isDrum && S.arr[c].inst < 0 ? null : kindNow(), S.arr[c].voice);
@@ -358,7 +409,9 @@ async function mountEditor() {
   try { mod = await import(`./machines/${app.id}-editor.js`); } catch { mod = null; }
   if (tok !== editorToken) return;
   if (mod && mod.mountEditor) {
-    try { editorHandle = mod.mountEditor(el, inst, kit, onChange, { Machine: M(), presets: presetsOf(app.id), voices: voicesOf(app.id) }); }
+    const ectx = { Machine: M(), presets: presetsOf(app.id), voices: voicesOf(app.id), index: idx, applyTable, setStatus };
+    if (EXT && EXT.editorCtx) Object.assign(ectx, EXT.editorCtx(app.id) || {});
+    try { editorHandle = mod.mountEditor(el, inst, kit, onChange, ectx); }
     catch (err) { el.textContent = 'Editor error: ' + err.message; console.error(err); }
   } else genericEditor(el, inst, onChange);
 }
@@ -370,6 +423,23 @@ function genericEditor(el, inst, onChange) {
     else if (typeof v === 'boolean') kit.toggle(g, { label: k, value: v, onChange: (x) => { inst[k] = x; onChange(inst); } });
     else kit.note(g, `${k}: ${JSON.stringify(v).slice(0, 120)}`);
   }
+}
+/** replace several table entries at once ({ index: instrument }) — e.g. an .op2 bank over the GM-slot presets */
+function applyTable(entries, id = app.id) {
+  if (id !== app.id) {
+    const st = savedTable(id);
+    for (const [i, inst] of Object.entries(entries)) if (+i < st.table.length) st.table[+i] = { ...clone(inst), name: st.table[+i].name };
+    writeTable(id, st.table, st.kit, st.sel);
+    return;
+  }
+  for (const [i, inst] of Object.entries(entries)) if (+i < S.table.length) S.table[+i] = { ...clone(inst), name: S.table[+i].name, ...(S.table[+i].user ? { user: true } : {}) };
+  post({ t: 'instruments', id: app.id, list: S.table }); saveState(); reprep(); selectInst(S.sel, true);
+}
+/** forget all edits of a machine's presets (keeps user instruments) */
+function resetTable(id = app.id) {
+  const st = savedTable(id), P = presetsOf(id);
+  writeTable(id, P.map(p => clone(p)).concat(st.table.slice(P.length)), st.kit, st.sel);
+  if (id === app.id) { loadState(); post({ t: 'instruments', id, list: S.table }); renderInstList(); selectInst(S.sel, true); }
 }
 $('instList').onchange = () => selectInst(+$('instList').value);
 $('instCopy').onclick = () => {
@@ -533,7 +603,10 @@ async function openMidi(file) {
 $('vol').oninput = (e) => post({ t: 'master', v: +e.target.value });
 document.addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('dragging'); });
 document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.body.classList.remove('dragging'); });
-document.addEventListener('drop', async (e) => { e.preventDefault(); document.body.classList.remove('dragging'); const f = e.dataTransfer.files[0]; if (f) await openMidi(f); });
+document.addEventListener('drop', async (e) => {
+  e.preventDefault(); document.body.classList.remove('dragging');
+  for (const f of e.dataTransfer.files) { if (EXT && EXT.onDrop && await EXT.onDrop(f)) continue; await openMidi(f); }
+});
 
 // ------------------------------------------------------------ stats / scope
 const scope = $('scope'), sctx = scope.getContext('2d');
@@ -626,5 +699,12 @@ $('midiIn').onchange = (e) => {
   };
 };
 
+// app API for extensions (Blasta)
+export const API = {
+  app, S, MACHINES, IDS, GROUP, post, sendNow, setStatus, selectMachine, runPrep, primeMachine, applyTable, resetTable,
+  savedTable, presetsOf, voicesOf, optionsOf, loadOpt, player, KB_CH, powerOn, get ctx() { return ctx; }, get node() { return node; },
+  reloadInstruments() { loadState(); renderInstList(); renderArranger(); selectInst(S.sel, true); if (node) pushAll(); },
+};
 // initial paint (before power-on)
+if (EXT_URL) { try { EXT = await import(new URL(EXT_URL, document.baseURI).href); if (EXT.init) await EXT.init(API); } catch (err) { console.error(err); setStatus('Extension error: ' + err.message); } }
 loadState(); renderMachine(); buildVoices(); renderArranger(); renderInstList(); selectInst(S.sel, true);

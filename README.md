@@ -10,7 +10,21 @@ A Windows 3.1-style desktop of retro sound chips that you play with General MIDI
 | **Console** | NES (2A03), Super Nintendo (SPC700 + S-DSP), Genesis / Mega Drive (YM2612 + SN76489), TurboGrafx-16 (HuC6280), Game Boy (DMG APU). |
 | **Old School** | Apple IIe + Mockingboard (2× AY-3-8910 + speaker), Commodore 64 (SID), Atari 2600 (TIA), Atari 800 (POKEY), ZX Spectrum 128 (AY), MSX (YM2149), IBM PC speaker (8253 PIT). |
 
-Each machine runs an emulation of its own sound chip at the chip's native clock, with native bit depths. A period-style music driver squeezes General MIDI into the hardware's few voices, the way game composers had to. It ticks at the machine's frame rate, allocates voices, arpeggiates chords, quantizes envelopes to the chip's volume steps, and plays drums on noise channels.
+Each machine runs an emulation of its own sound chip at the chip's native clock, with native bit depths, and is played through its **own** instruments:
+
+- **Voices:** the chip's real channels (e.g. NES Pulse 1/2, Triangle, Noise, DPCM), with live meters, mute and solo.
+- **Instruments:** a native preset library in chip terms, plus your own copies, with an editor per chip:
+  - NES / Game Boy: FamiTracker-style editors, including the GB wave drawer.
+  - Genesis: algorithm diagram and operator envelopes.
+  - C64: GoatTracker-style wavetable and the 6581/8580 filter curve.
+  - SNES: sample source plus the ADSR rate-table graph.
+  - AY machines: R13 envelope shapes.
+  - Atari 2600: AUDC tuning charts.
+  - OPL: 2-op/4-op routing and waveform tiles.
+  - AWE32 / Live!: SoundFont zone and generator editor.
+  - Edits save automatically, and Export/Import moves them as files.
+- **Arranger:** shows how a General MIDI file lands on the chip. Each channel is on *Auto* (the machine's own GM mapping, run by a period-style frame-rate driver) or set to any native instrument, and can be pinned to a specific voice.
+- **Keyboard:** the on-screen or QWERTY keyboard, or a Web MIDI keyboard, plays the selected instrument.
 
 ## Layout
 

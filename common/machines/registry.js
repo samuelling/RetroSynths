@@ -11,9 +11,14 @@ import atari800 from './atari800.js';
 import zx from './zx.js';
 import msx from './msx.js';
 import pcspeaker from './pcspeaker.js';
+import opl2 from './opl2.js';
+import opl3 from './opl3.js';
+import awe32 from './awe32.js';
+import live from './live.js';
 
-export const MACHINES = { nes, gb, genesis, tg16, snes, apple2, c64, atari2600, atari800, zx, msx, pcspeaker };
+export const MACHINES = { nes, gb, genesis, tg16, snes, apple2, c64, atari2600, atari800, zx, msx, pcspeaker, opl2, opl3, awe32, live };
 export const GROUPS = {
   console: ['nes', 'snes', 'genesis', 'tg16', 'gb'],
   oldschool: ['apple2', 'c64', 'atari2600', 'atari800', 'zx', 'msx', 'pcspeaker'],
+  blasta: ['opl2', 'opl3', 'awe32', 'live'],
 };

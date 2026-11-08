@@ -1,0 +1,81 @@
+/* Blasta-only styles on top of common/app.css: ISA card + era slider, bank slots, Bank Locker, compact voices. */
+.ticks button { background: var(--face); border: 1px solid var(--dk); box-shadow: inset 1px 1px var(--hi), inset -1px -1px var(--lo); cursor: pointer; font: inherit; }
+.ticks button.on { box-shadow: inset 1px 1px var(--lo), inset -1px -1px var(--hi); background: #d8d8d8; font-weight: bold; }
+/* ---------- era ---------- */
+.era { grid-column: 1 / -1; }
+.era-top { display: flex; gap: 14px; align-items: center; }
+.isa { width: 230px; flex: none; }
+.pcb { position: relative; height: 92px; background: linear-gradient(#1f6b35, #175a2b); border: 1px solid #0b3317; border-radius: 3px 3px 0 0;
+  box-shadow: inset 0 0 0 2px rgba(255,255,255,.05); overflow: hidden; transition: background .4s; }
+.pcb::before { content: ""; position: absolute; inset: 0; background-image: repeating-linear-gradient(90deg, transparent 0 13px, rgba(255,220,120,.12) 13px 14px),
+  repeating-linear-gradient(0deg, transparent 0 17px, rgba(255,220,120,.08) 17px 18px); }
+.chip { position: absolute; left: 22px; top: 18px; width: 82px; height: 40px; background: #1b1b1b; color: #ddd; font: bold 10px "Lucida Console", monospace;
+  display: flex; align-items: center; justify-content: center; border-radius: 2px; box-shadow: 0 0 0 1px #000, 2px 2px 0 rgba(0,0,0,.4); text-align: center; }
+.chip::before, .chip::after { content: ""; position: absolute; left: 4px; right: 4px; height: 3px; background: repeating-linear-gradient(90deg, #c9c9c9 0 3px, transparent 3px 7px); }
+.chip::before { top: -4px; } .chip::after { bottom: -4px; }
+.chip.small { left: 120px; top: 24px; width: 46px; height: 26px; font-size: 8px; }
+.chip.small:empty { display: none; }
+.jack { position: absolute; right: 6px; width: 14px; height: 14px; border-radius: 50%; background: radial-gradient(#000 35%, #777 40%, #333 70%); }
+.jack:nth-of-type(3) { top: 14px; } .jack:nth-of-type(4) { top: 36px; }
+.silk { position: absolute; left: 10px; bottom: 6px; color: #f4f1d0; font: bold 10px "Lucida Console", monospace; letter-spacing: 1px; opacity: .85; }
+.edge { height: 10px; margin: 0 40px 0 26px; background: repeating-linear-gradient(90deg, #d9a52b 0 5px, #175a2b 5px 7px); border-radius: 0 0 2px 2px; }
+.era-info { flex: 1; min-width: 0; }
+.era-card { font-size: 18px; font-weight: bold; }
+.era-chip { font-size: 13px; margin-top: 2px; }
+.era-spec { color: #303030; margin-top: 4px; }
+.era-mix { color: var(--title); margin-top: 4px; min-height: 1.3em; }
+#era { width: 100%; margin: 10px 0 2px; accent-color: var(--title); height: 22px; }
+.ticks { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.ticks button { padding: 3px 4px; line-height: 1.1; }
+.ticks small { color: #404040; }
+
+.era .minfo { min-width: 0; }
+.era #mopts { margin-top: 6px; }
+/* ---------- banks ---------- */
+.banks { grid-column: 1 / -1; }
+.bankrow { display: grid; grid-template-columns: 120px 1fr auto auto auto; gap: 8px; align-items: center; padding: 3px 0; }
+.bankrow .bk { font-weight: bold; }
+.bstat { font-family: "Lucida Console", monospace; font-size: 11px; background: #fff; padding: 2px 6px; box-shadow: inset 1px 1px var(--lo), inset -1px -1px var(--hi);
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; }
+.progress { height: 14px; margin-top: 6px; background: #fff; box-shadow: inset 1px 1px var(--lo), inset -1px -1px var(--hi); padding: 2px; }
+#progBar { height: 100%; width: 0; background: repeating-linear-gradient(90deg, var(--title) 0 9px, transparent 9px 11px); transition: width .2s; }
+
+/* ---------- locker ---------- */
+.locker { grid-column: 1 / -1; }
+.locker input[type=url], .locker input[type=password] { background: #fff; border: 1px solid var(--dk); box-shadow: inset 1px 1px var(--lo); padding: 2px 4px; min-width: 0; }
+#lkList { background: #fff; box-shadow: inset 1px 1px var(--lo), inset -1px -1px var(--hi); max-height: 180px; overflow: auto; }
+.lkrow { display: grid; grid-template-columns: 1fr 70px 110px auto; gap: 8px; align-items: center; padding: 2px 6px; font-family: "Lucida Console", monospace; font-size: 11px; }
+.lkrow:nth-child(even) { background: #f0f0f0; }
+.lkname { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.lksize { text-align: right; } .lkin { color: var(--title); }
+.lkbtns { display: flex; gap: 3px; }
+.lkempty { padding: 6px; color: #606060; }
+.lkstat { margin-top: 4px; color: #303030; min-height: 1.3em; }
+#lkInfo { color: #404040; }
+@media (max-width: 760px) {
+  .lkrow { grid-template-columns: 1fr auto; }
+  .lkrow .lkin { grid-column: 1; } .lkrow .lkbtns { grid-column: 2; grid-row: 1 / span 2; }
+  .locker input[type=url] { width: 100%; }
+}
+
+.lkrow { grid-template-columns: 1fr 70px 120px auto auto; }
+.lkpub { font-family: var(--ui); }
+#shelfList { background: #fff; box-shadow: inset 1px 1px var(--lo), inset -1px -1px var(--hi); max-height: 180px; overflow: auto; }
+#shelfList .lkrow { grid-template-columns: 1fr 70px 150px auto; }
+.shelfhead { margin: 8px 0 3px; font-weight: bold; }
+.shelfhead small { font-weight: normal; color: #404040; }
+
+
+/* 30–64 wavetable voices: compact grid */
+#voiceRows.compact { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0 10px; }
+#voiceRows.compact .vrow { grid-template-columns: 30px 1fr 34px; gap: 4px; padding: 0 2px; font-size: 11px; }
+#voiceRows.compact .vrow .vwhat { font-size: 10px; }
+@media (max-width: 760px) {
+  .isa { width: 150px; }
+  .pcb { height: 70px; }
+  .chip { left: 10px; top: 12px; width: 70px; height: 32px; font-size: 9px; }
+  .chip.small { left: 88px; top: 16px; width: 34px; height: 22px; font-size: 7px; }
+  .silk { font-size: 8px; }
+  .bankrow { grid-template-columns: 1fr auto; }
+  .bankrow .bstat { grid-column: 1 / -1; order: 3; }
+}

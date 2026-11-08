@@ -11,7 +11,7 @@ import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const [id, ...picks] = process.argv.slice(2);
 if (!id) { console.error('usage: node tests/shot-machine.mjs <id> [presetIndex …]'); process.exit(2); }
-const group = ['nes', 'snes', 'genesis', 'tg16', 'gb'].includes(id) ? 'console' : 'oldschool';
+const group = ['nes', 'snes', 'genesis', 'tg16', 'gb'].includes(id) ? 'console' : ['opl2', 'opl3', 'awe32', 'live'].includes(id) ? 'blasta' : 'oldschool';
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json', '.css': 'text/css' };
 const server = http.createServer((req, res) => {
   const p = path.join(root, decodeURIComponent(new URL(req.url, 'http://x').pathname));
@@ -33,7 +33,7 @@ try {
   await page.evaluate(() => localStorage.clear());
   await page.reload();
   await page.click('#boot');
-  await page.waitForTimeout(id === 'snes' ? 4000 : 1500);
+  await page.waitForTimeout(id === 'snes' ? 4000 : group === 'blasta' ? 9000 : 1500);
   await page.click('#btnDemo');
   await page.waitForTimeout(3500);
   const info = await page.evaluate(() => ({

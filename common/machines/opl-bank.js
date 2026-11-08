@@ -1,6 +1,12 @@
-// Blasta original FM bank — 128 General MIDI melodic patches + GM percussion,
-// designed from scratch in OPL register terms. (Not derived from any commercial driver bank.)
-//
+// OPL patch bank in register terms: the original Blasta GM FM bank (128 melodic + GM percussion,
+// designed from scratch — not derived from any commercial driver bank), plus 4-op OPL3 showcase patches.
+// Preset = { name, category, kind: 'fm', four, dual, ops[2|4]: {mult,tl,ar,dr,sl,rr,ws,egt,ksr,vib,am,ksl},
+//            fb, cnt, fb2, cnt2, offset, offset2, detune, fixed, note }
+//   2-op: ops[0]=modulator, ops[1]=carrier, fb/cnt (C0 register).
+//   dual: two independent 2-op voices (the OP2 "double voice"): ops[2..3] with fb2/cnt2, offset2, detune.
+//   four: OPL3 4-op channel pair, ops 1→4; cnt = first pair's CNT, cnt2 = second pair's (algorithm (cnt<<1)|cnt2).
+import { GM_NAMES, GM_DRUMS } from '../gm.js';
+
 // Row: [mMult,mTL,mAR,mDR,mSL,mRR,mWS,mFlags,  cMult,cTL,cAR,cDR,cSL,cRR,cWS,cFlags,  FB,CNT, noteOffset]
 // Flags: S=sustaining envelope (EGT), K=key-scale rate, V=vibrato, A=tremolo, L1..L3=key-scale level
 const S = 1, K = 2, V = 4, A = 8, L1 = 16, L2 = 32, L3 = 48;
@@ -190,16 +196,56 @@ const DRUMS = {
   80: tri(9), 81: tri(4),
 };
 
-function op(mult, tl, ar, dr, sl, rr, ws, f) {
+
+export function op(mult, tl, ar, dr, sl, rr, ws, f = 0) {
   return { mult, tl, ar, dr, sl, rr, ws, egt: f & 1, ksr: (f >> 1) & 1, vib: (f >> 2) & 1, am: (f >> 3) & 1, ksl: (f >> 4) & 3 };
 }
-function voice(r) {
-  return { m: op(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]), c: op(r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15]), fb: r[16], cnt: r[17], offset: r[18] || 0 };
+const FAMILY = ['Piano', 'Chromatic', 'Organ', 'Guitar', 'Bass', 'Strings', 'Ensemble', 'Brass', 'Reed', 'Pipe', 'Synth Lead', 'Synth Pad', 'Synth FX', 'Ethnic', 'Percussive', 'Sound FX'];
+const base = (name, category) => ({ name, category, kind: 'fm', four: false, dual: false, ops: [], fb: 0, cnt: 0, fb2: 0, cnt2: 0, offset: 0, offset2: 0, detune: 0, fixed: false, note: 60 });
+function fromRow(name, category, r) {
+  const p = base(name, category);
+  p.ops = [op(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]), op(r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15])];
+  p.fb = r[16]; p.cnt = r[17]; p.offset = r[18] || 0;
+  return p;
 }
+const F4 = (name, fb, cnt, cnt2, ops, extra = {}) => ({ ...base(name, '4-op OPL3'), four: true, fb, cnt, cnt2, ops, ...extra });
+// 4-op showcase (OPL3 only; OPL2 plays them as two 2-op halves)
+const FOUR = [
+  F4('4-op DX Tine Piano', 6, 0, 1, [op(14, 38, 15, 6, 15, 6, 0, L1), op(1, 4, 15, 4, 15, 6, 0), op(1, 30, 15, 3, 15, 6, 0), op(1, 2, 15, 2, 15, 6, 0)]),
+  F4('4-op Brass Stack', 5, 0, 0, [op(1, 30, 10, 2, 2, 7, 0, S | V), op(1, 26, 10, 2, 2, 7, 0, S), op(1, 22, 11, 2, 2, 7, 0, S), op(1, 0, 11, 2, 2, 7, 0, S | V)]),
+  F4('4-op Drawbar Organ', 0, 1, 1, [op(1, 2, 15, 0, 0, 7, 0, S), op(1, 63, 15, 0, 0, 7, 0, S), op(2, 8, 15, 0, 0, 7, 0, S), op(4, 14, 15, 0, 0, 7, 0, S)]),
+  F4('4-op Glass Bell', 3, 0, 1, [op(7, 30, 15, 3, 15, 4, 0), op(2, 6, 15, 3, 15, 4, 0), op(5, 34, 15, 4, 15, 5, 0), op(1, 4, 15, 2, 15, 4, 0)]),
+  F4('4-op Sub Bass', 4, 1, 0, [op(0, 6, 15, 4, 4, 8, 0, S), op(1, 24, 15, 6, 15, 8, 0), op(1, 22, 15, 6, 15, 8, 0), op(1, 0, 15, 3, 6, 8, 0, S)]),
+  F4('4-op Saw Lead', 6, 0, 0, [op(1, 22, 15, 0, 0, 7, 0, S | V), op(1, 22, 15, 0, 0, 7, 0, S), op(2, 32, 15, 2, 4, 7, 0, S), op(1, 0, 15, 1, 1, 7, 0, S | V)]),
+];
+export const PRESETS = [
+  ...MELODIC.map((r, p) => fromRow(GM_NAMES[p], FAMILY[p >> 3], r)),
+  ...Object.keys(DRUMS).map(Number).sort((a, b) => a - b).map(n => ({ ...fromRow(GM_DRUMS[n], 'Drums', DRUMS[n][0]), fixed: true, note: DRUMS[n][1] })),
+  ...FOUR,
+];
+const DRUM0 = 128;                       // drum presets follow the 128 melodic ones, in note order 35..81
+export const gmPreset = (program) => program & 127;
+export const gmDrum = (note) => (note >= 35 && note <= 81 ? DRUM0 + note - 35 : -1);
 
-export function builtinFMBank() {
-  const melodic = MELODIC.map(r => ({ voices: [voice(r)], fixed: false }));
-  const drums = {};
-  for (const [k, [r, n]] of Object.entries(DRUMS)) drums[k] = { voices: [voice(r)], fixed: true, fixedNote: n };
-  return { name: 'Blasta Original FM', melodic, drums };
+/** Parse a DMX ".op2" (GENMIDI) bank into preset entries: 128 melodic (table 0–127) + drums 35–81 (table 128–174). */
+export function parseOP2(buf) {
+  const b = new Uint8Array(buf), dv = new DataView(buf);
+  if (String.fromCharCode(...b.slice(0, 8)) !== '#OPL_II#') throw new Error('Not an OP2 (GENMIDI) bank');
+  const rd = (o) => { const t = b[o], at = b[o + 1], su = b[o + 2], wf = b[o + 3], sc = b[o + 4], lv = b[o + 5];
+    return { am: (t >> 7) & 1, vib: (t >> 6) & 1, egt: (t >> 5) & 1, ksr: (t >> 4) & 1, mult: t & 15, ar: at >> 4, dr: at & 15, sl: su >> 4, rr: su & 15, ws: wf & 7, ksl: (sc >> 6) & 3, tl: lv & 63 }; };
+  const names = [];
+  const nameOff = 8 + 175 * 36;
+  for (let i = 0; i < 175; i++) { let s = ''; for (let k = 0; k < 32; k++) { const c = b[nameOff + i * 32 + k]; if (!c) break; s += String.fromCharCode(c); } names.push(s.trim()); }
+  const out = [];
+  for (let i = 0; i < 175; i++) {
+    const o = 8 + i * 36, flags = dv.getUint16(o, true), fine = b[o + 2], note = b[o + 3];
+    const drum = i >= 128, p = base(drum ? GM_DRUMS[35 + i - 128] : GM_NAMES[i], drum ? 'Drums' : FAMILY[i >> 3]);
+    const v1 = o + 4, v2 = o + 20;
+    p.ops = [rd(v1), rd(v1 + 7)]; p.fb = (b[v1 + 6] >> 1) & 7; p.cnt = b[v1 + 6] & 1; p.offset = dv.getInt16(v1 + 14, true);
+    if (flags & 4) { p.dual = true; p.ops.push(rd(v2), rd(v2 + 7)); p.fb2 = (b[v2 + 6] >> 1) & 7; p.cnt2 = b[v2 + 6] & 1; p.offset2 = dv.getInt16(v2 + 14, true); p.detune = ((fine / 2) - 64) / 32; }
+    p.fixed = !!(flags & 1) || drum; p.note = (flags & 1) ? note : 60;
+    p.op2name = names[i] || '';
+    out.push(p);
+  }
+  return out;
 }
