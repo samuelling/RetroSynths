@@ -29,6 +29,22 @@ const server = http.createServer((req, res) => {
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 const port = server.address().port;
 
+
+// pull a big ArrayBuffer out of the page in base64 chunks (Array.from on 60 MB WAVs runs Chrome out of memory)
+async function pullWav(page, name) {
+  const len = await page.evaluate((n) => window[n].byteLength, name);
+  const parts = [];
+  for (let off = 0; off < len; off += 4 << 20) {
+    const b64 = await page.evaluate(([n, o, e]) => {
+      const u = new Uint8Array(window[n], o, e - o); let s = '';
+      for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+      return btoa(s);
+    }, [name, off, Math.min(len, off + (4 << 20))]);
+    parts.push(Buffer.from(b64, 'base64'));
+  }
+  return Buffer.concat(parts);
+}
+
 const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome' });
 const page = await browser.newPage();
 const pageErrors = [];
@@ -39,11 +55,11 @@ try {
   await page.goto(`http://127.0.0.1:${port}/tests/machine-test.html`);
   fs.mkdirSync('/tmp/rs', { recursive: true });
   const demo = await page.evaluate(([i, s, st]) => window.runDemo(i, s, st), [id, seconds, start]);
-  fs.writeFileSync(`/tmp/rs/${id}_demo.wav`, Buffer.from(await page.evaluate(() => Array.from(new Uint8Array(window._demoWav)))));
+  fs.writeFileSync(`/tmp/rs/${id}_demo.wav`, await pullWav(page, '_demoWav'));
   console.log('DEMO', JSON.stringify(demo));
   if (args.includes('--sweep')) {
     const sw = await page.evaluate((i) => window.runSweep(i), id);
-    fs.writeFileSync(`/tmp/rs/${id}_sweep.wav`, Buffer.from(await page.evaluate(() => Array.from(new Uint8Array(window._sweepWav)))));
+    fs.writeFileSync(`/tmp/rs/${id}_sweep.wav`, await pullWav(page, '_sweepWav'));
     const med = (a) => [...a].sort((x, y) => x - y)[a.length >> 1];
     const mm = med(sw.melodic), dm = med(sw.drums);
     console.log('SWEEP', JSON.stringify({ melodicMedianDb: mm, drumMedianDb: dm, nan: sw.nan, errors: sw.errors,
