@@ -38,7 +38,7 @@ export class POKEY {
   }
   reset() {
     this.f.fill(0); this.c.fill(0); this.o.fill(0); this.lv.fill(0);
-    this.audctl = 0; this.t = 0; this.l1 = 0; this.l2 = 0; this.level = 0;
+    this.audctl = 0; this.t = 0; this.l1 = 0; this.l2 = 0; this.level = 0; this.mute = this.mute | 0;
     for (let i = 0; i < 4; i++) this.nx[i] = this.per(i);
   }
   /** Divider period of channel i in machine cycles (Infinity: low half of a joined pair). */
@@ -84,7 +84,7 @@ export class POKEY {
       let bit = o[i];
       if (i === 0 && (a & 4)) bit ^= this.l1;
       if (i === 1 && (a & 2)) bit ^= this.l2;
-      const v = c[i] & 15;
+      const v = (this.mute >> i) & 1 ? 0 : c[i] & 15;     // mute: tracker-style channel mute, not a POKEY feature
       s += (c[i] & 0x10) ? v : bit ? v : 0;
     }
     this.level = s;

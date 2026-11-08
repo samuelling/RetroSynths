@@ -30,7 +30,7 @@ class PSGChannel {
   reset() {
     this.freq = 0; this.ctl = 0; this.bal = 0; this.wave.fill(0); this.idx = 0;
     this.cnt = 4096; this.cur = 0; this.dda = 0; this.noise = 0; this.lfsr = 1; this.ncnt = 32; this.ncur = 0;
-    this.gL = 0; this.gR = 0; this.eff = 4096;
+    this.gL = 0; this.gR = 0; this.eff = 4096; this.mute = this.mute | 0;
   }
 }
 
@@ -90,7 +90,7 @@ export class PSG {
     }
     for (let k = 0; k < 6; k++) {
       const c = this.ch[k];
-      if (!(c.ctl & 0x80) || (k === 1 && lfo)) continue;
+      if (!(c.ctl & 0x80) || (k === 1 && lfo) || c.mute) continue;      // mute: tracker-style, not a PSG feature
       let acc;
       if (c.ctl & 0x40) acc = (c.dda - off) * T;
       else if (k >= 4 && (c.noise & 0x80)) {

@@ -79,6 +79,7 @@ class TIAChannel {
 export class TIA {
   constructor() {
     this.ch = [new TIAChannel(), new TIAChannel()];
+    this.mute = [0, 0];                       // per-channel output mute (tracker-style; not a TIA feature)
     // The two channel DACs share one output node; the sum compresses slightly as both channels rise
     // (resistor-network behaviour). Approximation: y = s/30 · (1+c)/(1+c·s/30), c = 0.5.
     this.mix = new Float32Array(31);
@@ -100,6 +101,6 @@ export class TIA {
   clock() {
     const a = this.ch[0], b = this.ch[1];
     a.clock(); b.clock();
-    return this.mix[(a.out ? a.audv : 0) + (b.out ? b.audv : 0)];
+    return this.mix[(a.out && !this.mute[0] ? a.audv : 0) + (b.out && !this.mute[1] ? b.audv : 0)];
   }
 }

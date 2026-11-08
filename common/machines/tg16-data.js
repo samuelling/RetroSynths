@@ -118,6 +118,17 @@ export function ddaSample(note) {
   }
 }
 
+/** Named DDA sample bank: name → [label, GM note it is synthesised from, pitch (MIDI) it plays at rate 1]. */
+export const DDA_BANK = {
+  kick: ['Kick (sine drop)', 36, 36], kickDeep: ['Kick deep', 35, 35], snare: ['Snare (tone+noise)', 38, 38], snareBright: ['Snare bright', 40, 40],
+  clap: ['Clap', 39, 39], stick: ['Side stick', 37, 37], tom: ['Tom', 45, 48], conga: ['Conga', 63, 67], congaSlap: ['Conga slap', 62, 70],
+  cowbell: ['Cowbell', 56, 73], agogo: ['Agogo', 67, 79], block: ['Wood block', 76, 94], rideBell: ['Ride bell', 53, 80],
+  triangle: ['Triangle', 80, 102], triangleOpen: ['Triangle open', 81, 102], vibraslap: ['Vibraslap', 58, 81],
+  whistle: ['Whistle', 72, 99], guiro: ['Guiro', 74, 60], cuica: ['Cuica', 78, 74],
+};
+/** Synthesise the whole DDA bank (worklet side). */
+export function buildDDA() { const b = {}; for (const [k, v] of Object.entries(DDA_BANK)) b[k] = ddaSample(v[1]); return b; }
+
 /** Noise-channel drum macros: per frame [noise frequency 0–31, level 0..1]. */
 export function noiseMacro(note) {
   const kind = drumKind(note);

@@ -2,27 +2,28 @@
 //
 // The TIA can only make a few dozen pitches per distortion mode (31.4 kHz ÷ (AUDF+1) ÷ the mode's
 // pattern length), so — like 2600 composers working from pitch charts — the driver picks, per note,
-// the AUDC/AUDF pair nearest in pitch among the timbres the patch allows (optionally an octave away),
-// and lives with the error. Voice 0/1 go to melody and bass; drums (poly-noise and pitch-dropping
-// div-31 tones) interrupt the bass for a few frames and the bass resumes.
+// the AUDC/AUDF pair nearest in pitch among the instrument's distortion mode and its fallbacks
+// (optionally an octave away), and lives with the error. Instruments are native: AUDC mode, 4-bit
+// volume macro, arpeggio/pitch macros, and per-frame AUDC/AUDF macros for drums. AUD0/AUD1 go to
+// melody and bass; drums interrupt the bass for a few frames and the bass resumes.
 // Original code for RetroSynths.
-import { Resampler, DCBlock, drumKind, TOM_NOTE } from './util.js';
+import { Resampler, DCBlock, drumKind } from './util.js';
 import { TIA, TIA_RATE, TIA_FRAME_CLOCKS, MODE_PERIOD, tiaHz } from './tia.js';
-import { Driver, DRUM_PRIO } from './atari-driver.js';
+import { Driver, CLASS, DRUM_PRIO, mac, envMacro, pitchMacro, qLin, gmTable } from './atari-driver.js';
 
-// timbre class → AUDC modes to try, in order of preference
-const MODES = {
-  piano: [12, 4, 6], epiano: [12, 4, 6], harpsi: [1, 12], clav: [1, 12], bell: [4, 12], vibes: [4, 12], mallet: [12, 4],
-  organ: [12, 6, 4], reed: [1, 12, 6], pluck: [12, 1, 6], dist: [7, 1], bass: [6, 14, 1], synbass: [1, 6, 15],
-  string: [1, 12, 6], pad: [12, 6], voice: [12, 6], hit: [1, 12], brass: [1, 12, 6], flute: [12, 4, 6], square: [12, 4, 6],
-  saw: [1, 12, 6], bird: [4, 12], phone: [4, 12], timpani: [6, 14], tomperc: [6, 14, 12], block: [4, 12],
-};
-const RANK_CENTS = 14;     // cost of using a less-preferred timbre, in cents of pitch error
-const OCT_CENTS = 40;      // cost of substituting an octave
+const RANK_CENTS = 14;     // cost of using a fallback mode, in cents of pitch error
+const OCT_CENTS = 40;      // cost per octave of substitution
+export const AUDC_NAMES = ['0 · set to 1 (volume only)', '1 · 4-bit poly (buzz)', '2 · ÷15 → 4-bit poly (drone)', '3 · 5-bit → 4-bit poly (drone)',
+  '4 · ÷2 pure (high square)', '5 · ÷2 pure (high square)', '6 · ÷31 pure (bass square)', '7 · 5-bit poly → ÷2 (buzzy)',
+  '8 · 9-bit poly (white noise)', '9 · 5-bit poly (tone noise)', '10 · ÷31 pure (bass)', '11 · set last 4 bits to 1 (volume only)',
+  '12 · ÷6 pure (lead)', '13 · ÷6 pure (lead)', '14 · ÷93 pure (low)', '15 · 5-bit poly ÷6 (rumble)'];
+/** Modes whose AUDF is a colour, not a pitch. */
+export const NOISE_MODE = (c) => c === 8 || c === 0 || c === 11;
 
-/** Nearest AUDF in one mode for a frequency; returns error in cents via out[1]. */
-function nearestF(mode, hz, out) {
+/** Nearest AUDF in one mode for a frequency → [AUDF, cents error]. */
+export function nearestF(mode, hz, out = [0, 0]) {
   const P = MODE_PERIOD[mode];
+  if (!P) { out[0] = 0; out[1] = 1200; return out; }
   let F = Math.round(TIA_RATE / (P * hz)) - 1;
   F = F < 0 ? 0 : F > 31 ? 31 : F;
   let best = F, be = Infinity;
@@ -33,59 +34,135 @@ function nearestF(mode, hz, out) {
   out[0] = best; out[1] = be;
   return out;
 }
-
+const OCTS = [0, -12, 12, -24, -36, -48];
 /** Choose AUDC/AUDF (and octave substitution) for a MIDI pitch. → { audc, audf, oct, cents } */
 export function pickTone(modes, semis, allowOct = true) {
   const hz = 440 * Math.pow(2, (semis - 69) / 12), tmp = [0, 0];
   let best = null, bc = Infinity;
   for (let r = 0; r < modes.length; r++) {
-    for (const oct of allowOct ? [0, -12, 12] : [0]) {
+    if (!MODE_PERIOD[modes[r]]) continue;
+    for (const oct of allowOct ? OCTS : [0]) {
       nearestF(modes[r], hz * Math.pow(2, oct / 12), tmp);
-      const cost = tmp[1] + r * RANK_CENTS + (oct ? OCT_CENTS : 0);
+      const cost = tmp[1] + r * RANK_CENTS + Math.abs(oct / 12) * OCT_CENTS;
       if (cost < bc) { bc = cost; best = { audc: modes[r], audf: tmp[0], oct, cents: tmp[1] }; }
     }
   }
-  return best;
+  return best || { audc: modes[0] | 0, audf: 0, oct: 0, cents: 1200 };
 }
 
-// ---- drums: per-frame [AUDC, AUDF, level] macros, like a 2600 driver's drum tables ----
+// ---------------------------------------------------------------- native instrument library
+const Q = qLin(15);
+function mel(name, category, cls, audc, alt, x = {}) {
+  const c = CLASS[cls], env = x.env || c.env, vib = x.vib !== undefined ? x.vib : c.vib;
+  return {
+    name, category, kind: 'any', role: x.role || c.role, drum: false,
+    audc, alt, octSub: x.octSub !== undefined ? x.octSub : true,
+    vol: envMacro(env, Q, { trem: x.trem || c.trem }),
+    arp: c.trill ? mac([0, 0, c.trill, c.trill], 0) : mac(),
+    pitch: pitchMacro({ sweep: x.sweep !== undefined ? x.sweep : c.sweep, bird: c.bird }),
+    dist: mac(), freq: mac(),
+    rel: Math.max(1, Math.round(env[3] * 60)),
+    vibDelay: vib ? Math.round(vib[0] * 60) : 0, vibDepth: vib ? Math.round(vib[1] * 100) : 0, vibRate: vib ? vib[2] : 5.5,
+  };
+}
 const dec = (c, f, v0, n, k = 0.72, df = 0) => Array.from({ length: n }, (_, i) => [c, Math.min(31, Math.round(f + df * i)), v0 * Math.pow(k, i)]);
-function drumMacro(note) {
-  const kind = drumKind(note);
-  let fr;
-  switch (kind) {
-    case 'kick': fr = [[6, 6, 1], [6, 9, 0.92], [6, 13, 0.78], [6, 17, 0.62], [6, 22, 0.46], [6, 27, 0.3], [6, 31, 0.17], [6, 31, 0.08]];
-      if (note === 35) fr = fr.map(([c, f, v]) => [c, Math.min(31, f + 2), v]); break;
-    case 'snare': fr = [[8, 6, 1], [8, 7, 0.86], [8, 8, 0.7], [8, 9, 0.55], [8, 10, 0.42], [8, 11, 0.3], [8, 12, 0.2], [8, 13, 0.12], [8, 14, 0.06]];
-      if (note === 40) fr.unshift([12, 7, 0.9]); break;
-    case 'clap': fr = [[8, 3, 0.9], [8, 3, 0.3], [8, 3, 0.85], [8, 3, 0.3], ...dec(8, 4, 0.75, 7, 0.68)]; break;
-    case 'stick': fr = [[8, 1, 1], [4, 6, 0.7], [4, 6, 0.35]]; break;
-    case 'hatClosed': fr = [[8, 0, 0.85], [8, 0, 0.45], [8, 0, 0.18]]; break;
-    case 'hatPedal': fr = [[8, 0, 0.7], [8, 0, 0.35], [8, 0, 0.14]]; break;
-    case 'hatOpen': fr = dec(8, 0, 0.55, 18, 0.86); break;
-    case 'crash': fr = dec(8, 1, 0.85, 48, 0.94); if (note === 55) fr = dec(8, 0, 0.75, 26, 0.9); break;
-    case 'ride': fr = [[4, 3, 0.45], ...dec(8, 0, 0.4, 24, 0.9)]; break;
-    case 'bell': fr = dec(4, 8, 0.7, 22, 0.88); break;
-    case 'shaker': fr = [[8, 0, 0.28], [8, 0, 0.36], [8, 0, 0.2], [8, 0, 0.08]]; if (note === 54) fr = [[4, 1, 0.3], ...dec(8, 0, 0.42, 7, 0.75)]; break;
-    case 'cowbell': fr = note === 56 ? dec(4, 19, 0.8, 9, 0.75) : dec(4, note === 67 ? 14 : 18, 0.75, 8, 0.74); break;
-    case 'triangle': fr = dec(4, 3, 0.55, note === 81 ? 36 : 6, note === 81 ? 0.93 : 0.7); break;
-    case 'block': fr = [[4, note === 76 ? 8 : note === 77 ? 12 : 10, 0.75], [4, 10, 0.3], [4, 10, 0.1]]; break;
-    case 'tom': case 'conga': {
-      const t = pickTone(kind === 'tom' ? [6, 14] : [12, 4], TOM_NOTE[note] || 60, false);
-      fr = kind === 'tom' ? dec(t.audc, t.audf, 1, 12, 0.78, 0.5) : dec(t.audc, t.audf, 0.85, 6, 0.65);
-      break;
-    }
-    default:
-      if (note === 58) fr = dec(9, 4, 0.7, 20, 0.88);                                      // vibraslap
-      else if (note === 71 || note === 72) fr = Array.from({ length: note === 72 ? 18 : 8 }, () => [4, note === 71 ? 5 : 6, 0.5]);
-      else if (note === 73 || note === 74) fr = Array.from({ length: note === 74 ? 14 : 6 }, (_, i) => [8, 5, i & 1 ? 0.1 : 0.55]);
-      else if (note === 78 || note === 79) fr = dec(12, note === 78 ? 10 : 6, 0.7, 8, 0.8, -0.6);   // cuica
-      else { const t = pickTone([12, 4], note, false); fr = dec(t.audc, t.audf, 0.7, 6, 0.7); }
-  }
-  return { kind, prio: DRUM_PRIO[kind] ?? 46, len: fr.length, fr, choke: kind.startsWith('hat') ? 'hat' : null };
+function drum(name, kind, fr, x = {}) {
+  return {
+    name, category: 'Drums', kind: 'any', role: 'drum', drum: true, prio: DRUM_PRIO[kind] ?? 46,
+    choke: kind.startsWith('hat') ? 'hat' : '', track: !!x.track, audc: fr[0][0], alt: [], octSub: false,
+    vol: mac(fr.map((f) => Q(Math.min(1, 1.12 * f[2])))), dist: mac(fr.map((f) => f[0])), freq: mac(fr.map((f) => f[1])),
+    arp: mac(), pitch: mac(), rel: 1, vibDelay: 0, vibDepth: 0, vibRate: 5.5,
+  };
 }
 
-const NOISE_AUDC = { heli: 3, sea: 8, gun: 8, applause: 8, fret: 8, breath: 8, cymbal: 8, hiss: 8 };
+const PRESETS = [
+  // leads
+  mel('Div6 Pure Lead', 'Lead', 'square', 12, [4, 6]),
+  mel('Poly4 Saw Lead', 'Lead', 'saw', 1, [12, 6]),
+  mel('Poly5 Buzz Lead', 'Lead', 'dist', 7, [1], { env: [0.003, 0.5, 0.8, 0.1] }),
+  mel('Div2 High Square', 'Lead', 'square', 4, [12], { octSub: true }),
+  mel('Div6 Flute', 'Lead', 'flute', 12, [4, 6]),
+  mel('Poly4 Reed', 'Lead', 'reed', 1, [12, 6]),
+  mel('Poly4 Brass', 'Brass', 'brass', 1, [12, 6]),
+  mel('Div6 Brass Swell', 'Brass', 'brass', 12, [6], { env: [0.08, 0.3, 0.8, 0.15] }),
+  // keys / mallets
+  mel('Div6 Piano Decay', 'Keys', 'piano', 12, [4, 6]),
+  mel('Div6 E.Piano', 'Keys', 'epiano', 12, [4, 6]),
+  mel('Poly4 Harpsi Pluck', 'Keys', 'harpsi', 1, [12]),
+  mel('Div6 Organ', 'Keys', 'organ', 12, [6, 4]),
+  mel('Div2 Bell', 'Chromatic', 'bell', 4, [12]),
+  mel('Div2 Vibes Tremolo', 'Chromatic', 'vibes', 4, [12]),
+  mel('Div6 Mallet', 'Chromatic', 'mallet', 12, [4]),
+  // plucked / strings / pads
+  mel('Div6 Pluck', 'Guitar', 'pluck', 12, [1, 6]),
+  mel('Poly5 Dist Guitar', 'Guitar', 'dist', 7, [1]),
+  mel('Poly4 Strings', 'Strings', 'string', 1, [12, 6]),
+  mel('Div6 Pad', 'Pad', 'pad', 12, [6]),
+  mel('Div6 Voice', 'Pad', 'voice', 12, [6]),
+  mel('Poly4 Orchestra Hit', 'Strings', 'hit', 1, [12]),
+  // bass
+  mel('Div31 Bass', 'Bass', 'bass', 6, [14, 1]),
+  mel('Poly4 Synth Bass', 'Bass', 'synbass', 1, [6, 15]),
+  mel('Div93 Sub Bass', 'Bass', 'bass', 14, [6], { env: [0.002, 0.8, 0.6, 0.1] }),
+  mel('Poly5 Rumble Bass', 'Bass', 'synbass', 15, [7, 6]),
+  mel('Div31 Timpani', 'Bass', 'timpani', 6, [14]),
+  // melodic percussion & FX
+  mel('Div31 Tom Sweep', 'Percussive', 'tomperc', 6, [14, 12]),
+  mel('Div2 Wood Block', 'Percussive', 'block', 4, [12]),
+  mel('Poly9 Surf', 'FX', 'noise', 8, [], { env: [0.8, 1.0, 0.7, 1.0], trem: [0.25, 0.7] }),
+  mel('Poly9 Noise Hit', 'FX', 'noise', 8, [], { env: [0.001, 0.5, 0, 0.1] }),
+  mel('Poly9 Noise Swell', 'FX', 'noise', 8, [], { env: [1.0, 0.1, 0.8, 0.3] }),
+  mel('Poly5>Poly4 Engine', 'FX', 'noise', 3, [2], { env: [0.3, 0.3, 0.9, 0.5], trem: [12, 0.6] }),
+  mel('Div31>Poly4 Drone', 'FX', 'pad', 2, [3]),
+  mel('Div2 Bird Chirp', 'FX', 'bird', 4, [12]),
+  mel('Div2 Phone Trill', 'FX', 'phone', 4, [12]),
+  // drums (per-frame AUDC / AUDF / AUDV tables)
+  drum('Kick Div31 Drop', 'kick', [[6, 6, 1], [6, 9, 0.92], [6, 13, 0.78], [6, 17, 0.62], [6, 22, 0.46], [6, 27, 0.3], [6, 31, 0.17], [6, 31, 0.08]]),
+  drum('Kick Div31 Deep', 'kick', [[6, 8, 1], [6, 11, 0.92], [6, 15, 0.78], [6, 19, 0.62], [6, 24, 0.46], [6, 29, 0.3], [6, 31, 0.17], [6, 31, 0.08]]),
+  drum('Snare Poly9', 'snare', [[8, 6, 1], [8, 7, 0.86], [8, 8, 0.7], [8, 9, 0.55], [8, 10, 0.42], [8, 11, 0.3], [8, 12, 0.2], [8, 13, 0.12], [8, 14, 0.06]]),
+  drum('Snare Div6+Poly9', 'snare', [[12, 7, 0.9], [8, 6, 1], [8, 7, 0.86], [8, 8, 0.7], [8, 9, 0.55], [8, 10, 0.42], [8, 11, 0.3], [8, 12, 0.2], [8, 13, 0.12]]),
+  drum('Clap Poly9', 'clap', [[8, 3, 0.9], [8, 3, 0.3], [8, 3, 0.85], [8, 3, 0.3], ...dec(8, 4, 0.75, 7, 0.68)]),
+  drum('Side Stick', 'stick', [[8, 1, 1], [4, 6, 0.7], [4, 6, 0.35]]),
+  drum('Hat Closed Poly9', 'hatClosed', [[8, 0, 0.85], [8, 0, 0.45], [8, 0, 0.18]]),
+  drum('Hat Pedal Poly9', 'hatPedal', [[8, 0, 0.7], [8, 0, 0.35], [8, 0, 0.14]]),
+  drum('Hat Open Poly9', 'hatOpen', dec(8, 0, 0.55, 18, 0.86)),
+  drum('Crash Poly9', 'crash', dec(8, 1, 0.85, 48, 0.94)),
+  drum('Ride Div2+Poly9', 'ride', [[4, 3, 0.45], ...dec(8, 0, 0.4, 24, 0.9)]),
+  drum('Shaker Poly9', 'shaker', [[8, 0, 0.28], [8, 0, 0.36], [8, 0, 0.2], [8, 0, 0.08]]),
+  drum('Cowbell Div2', 'cowbell', dec(4, 19, 0.8, 9, 0.75)),
+  drum('Bell Div2', 'bell', dec(4, 8, 0.7, 22, 0.88)),
+  drum('Triangle Div2', 'triangle', dec(4, 3, 0.55, 6, 0.7)),
+  drum('Triangle Div2 Open', 'triangle', dec(4, 3, 0.55, 36, 0.93)),
+  drum('Tom Div31 (tracks)', 'tom', dec(6, 0, 1, 12, 0.78, 0.5), { track: true }),
+  drum('Conga Div6 (tracks)', 'conga', dec(12, 0, 0.85, 6, 0.65), { track: true }),
+  drum('Perc Div2 (tracks)', 'block', [[4, 0, 0.75], [4, 0, 0.3], [4, 0, 0.1]], { track: true }),
+  drum('Rattle Poly5', 'perc', dec(9, 4, 0.7, 20, 0.88)),
+  drum('Scrape Poly9', 'perc', Array.from({ length: 10 }, (_, i) => [8, 5, i & 1 ? 0.1 : 0.55])),
+];
+
+const GM = gmTable(PRESETS, [
+  ['Div6 Piano Decay', [0, 1, 2, 3]], ['Div6 E.Piano', [4, 5]], ['Poly4 Harpsi Pluck', [6, 7]],
+  ['Div2 Bell', [8, 9, 10, 14, 31, 93, 96, 98, 100, 103, 108, 112]], ['Div2 Vibes Tremolo', [11]], ['Div6 Mallet', [12, 13, 113, 114]],
+  ['Div6 Organ', [16, 17, 18, 19, 20]], ['Poly4 Reed', [21, 22, 23, 64, 65, 66, 67, 68, 69, 70, 71, 109, 111]],
+  ['Div6 Pluck', [15, 24, 25, 26, 27, 28, 45, 46, 99, 104, 105, 106, 107]], ['Poly5 Dist Guitar', [29, 30, 84]],
+  ['Div31 Bass', [32, 33, 34, 35, 36, 37, 43, 58]], ['Poly4 Synth Bass', [38, 39, 87]],
+  ['Poly4 Strings', [40, 41, 42, 44, 48, 49, 110]], ['Div6 Pad', [50, 51, 88, 89, 92, 95, 97, 101, 102]],
+  ['Div6 Voice', [52, 53, 54, 85, 91, 94]], ['Poly4 Orchestra Hit', [55]], ['Poly4 Brass', [56, 57, 59, 61, 62, 63]], ['Div6 Brass Swell', [60]],
+  ['Div6 Flute', [72, 73, 74, 75, 76, 77, 78, 79, 82, 83]], ['Div6 Pure Lead', [80]], ['Poly4 Saw Lead', [81, 86, 90]],
+  ['Div31 Timpani', [47, 116]], ['Div31 Tom Sweep', [117, 118]], ['Div2 Wood Block', [115]],
+  ['Poly9 Noise Swell', [119, 121]], ['Poly9 Noise Hit', [120, 127]], ['Poly9 Surf', [122, 126]], ['Poly5>Poly4 Engine', [125]],
+  ['Div2 Bird Chirp', [123]], ['Div2 Phone Trill', [124]],
+]);
+const PI = (n) => PRESETS.findIndex((p) => p.name === n);
+const DRUMS = new Int16Array(128).fill(-1);
+for (let n = 27; n <= 87; n++) {
+  const k = drumKind(n);
+  const name = n === 35 ? 'Kick Div31 Deep' : n === 40 ? 'Snare Div6+Poly9' : n === 81 ? 'Triangle Div2 Open' : n === 58 ? 'Rattle Poly5' : (n === 73 || n === 74) ? 'Scrape Poly9' :
+    { kick: 'Kick Div31 Drop', snare: 'Snare Poly9', clap: 'Clap Poly9', stick: 'Side Stick', hatClosed: 'Hat Closed Poly9', hatPedal: 'Hat Pedal Poly9',
+      hatOpen: 'Hat Open Poly9', crash: 'Crash Poly9', ride: 'Ride Div2+Poly9', shaker: 'Shaker Poly9', cowbell: 'Cowbell Div2', bell: 'Bell Div2',
+      triangle: 'Triangle Div2', tom: 'Tom Div31 (tracks)', conga: 'Conga Div6 (tracks)', block: 'Perc Div2 (tracks)', perc: 'Perc Div2 (tracks)' }[k];
+  DRUMS[n] = PI(name);
+}
 
 export default class Atari2600 extends Driver {
   static info = {
@@ -93,24 +170,28 @@ export default class Atari2600 extends Driver {
     chip: 'TIA (Television Interface Adaptor)', voices: '2 × 5-bit divider · 4/5/9-bit polys',
     spec: 'two TIA channels at 31.4 kHz; nearest-pitch AUDC/AUDF tables, out of tune by design',
   };
+  static voices = [{ id: 'aud0', name: 'AUD0', kind: 'tia' }, { id: 'aud1', name: 'AUD1', kind: 'tia' }];
+  static presets = PRESETS;
+  static gmPreset(p) { return GM[p & 127]; }
+  static gmDrum(n) { return n >= 0 && n < 128 ? DRUMS[n] : -1; }
   static options = [
-    { key: 'oct', label: 'Octave substitution', choices: [[true, 'On'], [false, 'Off']], default: true },
+    { key: 'oct', label: 'Octave substitution', choices: [[true, 'Per instrument'], [false, 'Never']], default: true },
   ];
 
   constructor(host) {
-    super(host, 2, TIA_RATE / TIA_FRAME_CLOCKS);
+    super(host, [1, 2], 2, TIA_RATE / TIA_FRAME_CLOCKS);
     this.tia = new TIA();
     this.rs = new Resampler(TIA_RATE, host.sampleRate);
     this.dc = new DCBlock(host.sampleRate, 12);
-    this.fc = 0; this.allowOct = true;
+    this.fc = 0; this.allowOct = true; this.tmp = [0, 0];
     this.gain = 0.8;
-    this.drums = {};
-    for (let n = 27; n <= 87; n++) this.drums[n] = drumMacro(n);
+    this.melOrder = [0, 1]; this.drumOrder = [1, 0];
     this.cache = [[-1, -1, -1], [-1, -1, -1]];
   }
   setOption(key, value) { if (key === 'oct') this.allowOct = !!value; }
   maxVoices() { return 2; }
   reset() { this.resetDriver(); this.tia.reset(); this.cache = [[-1, -1, -1], [-1, -1, -1]]; }
+  applyVoiceMute(m) { this.tia.mute[0] = m & 1; this.tia.mute[1] = (m >> 1) & 1; }
 
   w(vi, audc, audf, audv) {
     const c = this.cache[vi];
@@ -118,31 +199,23 @@ export default class Atari2600 extends Driver {
     if (c[1] !== audf) { c[1] = audf; this.tia.write(0x17 + vi, audf); }
     if (c[2] !== audv) { c[2] = audv; this.tia.write(0x19 + vi, audv); }
   }
-  drumFor(note) { return this.drums[note] || this.drums[Math.max(27, Math.min(87, note))]; }
-
-  vol(amp) { const v = Math.round(15 * Math.min(1, 1.4 * amp)); return v < 0 ? 0 : v; }
-
   program(vi, vn) {
-    if (vn.isDrum) return;
-    const p = vn.p;
-    if (p.noise) { vn.tm = NOISE_AUDC[p.noise] || 8; vn.toct = 0; return; }
+    const inst = vn.inst;
+    if (vn.isDrum) { vn.tm = inst.audc; vn.toct = 0; vn.baseF = inst.track ? nearestF(inst.audc, 440 * Math.pow(2, (vn.pitch - 69) / 12), this.tmp)[0] : 0; return; }
+    if (NOISE_MODE(inst.audc)) { vn.tm = inst.audc; vn.toct = 0; return; }
     const ch = this.h.ch[vn.ch];
-    const t = pickTone(MODES[p.cls] || MODES.square, vn.note + ch.bend * ch.bendRange, this.allowOct);
+    const t = pickTone([inst.audc, ...(inst.alt || [])], vn.note + ch.bend * ch.bendRange, this.allowOct && inst.octSub);
     vn.tm = t.audc; vn.toct = t.oct;
   }
   update(vi, vn) {
-    if (vn.isDrum) {
-      const f = vn.dd.fr[Math.min(vn.frames, vn.len - 1)];
-      this.w(vi, f[0], f[1], this.vol(vn.amp * f[2] * 2.1));
-      return;
-    }
+    const inst = vn.inst, gm = vn.gm;
+    const audc = vn.dist >= 0 ? vn.dist & 15 : vn.tm;
     let audf;
-    if (vn.p.noise) audf = Math.max(0, Math.min(31, Math.round((96 - vn.pitch) / 2.5)));
-    else {
-      const hz = 440 * Math.pow(2, (vn.pitch + vn.toct - 69) / 12);
-      audf = nearestF(vn.tm, hz, this.tmp || (this.tmp = [0, 0]))[0];
-    }
-    this.w(vi, vn.tm, audf, this.vol(vn.amp));
+    if (vn.isDrum) audf = Math.max(0, Math.min(31, (inst.track ? vn.baseF : 0) + (vn.freq >= 0 ? vn.freq : 0)));
+    else if (NOISE_MODE(audc)) audf = Math.max(0, Math.min(31, Math.round((96 - vn.pitch) / 2.5)));
+    else audf = nearestF(audc, 440 * Math.pow(2, (vn.pitch + vn.toct - 69) / 12), this.tmp)[0];
+    const v = Math.round(vn.vol * Math.min(1, 1.4 * gm * (vn.isDrum ? 2.1 : 1)));
+    this.w(vi, audc, audf, v < 0 ? 0 : v > 15 ? 15 : v);
   }
   silence(vi) { this.w(vi, this.cache[vi][0] < 0 ? 0 : this.cache[vi][0], Math.max(0, this.cache[vi][1]), 0); }
 
