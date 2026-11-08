@@ -29,6 +29,7 @@ export function defineHost(MACHINES, name = 'retrosynths') {
       this.hostObj = { sampleRate, ch: this.ch, mute: this.mute, meter: this.meter };
       this.inst = {};                       // id → machine instance (lazy)
       this.data = {};                       // id → prep data waiting for instance
+      this.pending = {};                    // id → { instruments, arrangement, kit, voicemute } waiting for instance
       this.cur = null; this.prev = null;    // active and fading-out machine ids
       this.fade = 1; this.fadeStep = 1 / (0.04 * sampleRate);
       this.q = []; this.qi = 0;
@@ -44,7 +45,15 @@ export function defineHost(MACHINES, name = 'retrosynths') {
       if (!this.inst[id]) {
         try {
           this.inst[id] = new MACHINES[id](this.hostObj);
-          if (this.data[id] !== undefined && this.inst[id].setData) this.inst[id].setData(this.data[id]);
+          const m = this.inst[id];
+          if (this.data[id] !== undefined && m.setData) m.setData(this.data[id]);
+          const p = this.pending[id];
+          if (p) {
+            if (p.instruments && m.setInstruments) m.setInstruments(p.instruments);
+            if (p.arrangement && m.setArrangement) m.setArrangement(p.arrangement);
+            if (p.kit && m.setKit) m.setKit(p.kit);
+            if (p.voicemute != null && m.setVoiceMute) m.setVoiceMute(p.voicemute);
+          }
         } catch (err) { this.report(id, err); return null; }
       }
       return this.inst[id];
@@ -68,6 +77,21 @@ export function defineHost(MACHINES, name = 'retrosynths') {
         case 'clearq': this.q = []; this.qi = 0; break;
         case 'machine': this.setMachine(m.id); break;
         case 'data': this.data[m.id] = m.data; if (this.inst[m.id] && this.inst[m.id].setData) this.safe(m.id, x => x.setData(m.data)); break;
+        case 'instruments': case 'arrangement': case 'kit': case 'voicemute': {
+          const key = m.t, val = key === 'instruments' ? m.list : key === 'arrangement' ? m.arr : key === 'kit' ? m.kit : m.mask;
+          (this.pending[m.id] = this.pending[m.id] || {})[key] = val;
+          if (this.inst[m.id]) {
+            const fn = { instruments: 'setInstruments', arrangement: 'setArrangement', kit: 'setKit', voicemute: 'setVoiceMute' }[key];
+            this.safe(m.id, x => x[fn] && x[fn](val));
+          }
+          break;
+        }
+        case 'inst': {
+          const p = (this.pending[m.id] = this.pending[m.id] || {});
+          if (p.instruments) p.instruments[m.index] = m.inst;
+          if (this.inst[m.id]) this.safe(m.id, x => x.updateInstrument && x.updateInstrument(m.index, m.inst));
+          break;
+        }
         case 'option': this.safe(m.id || this.cur, x => x.setOption && x.setOption(m.key, m.value)); break;
         case 'mute': this.mute.set(m.v); for (let c = 0; c < 16; c++) this.safe(this.cur, x => x.ctrl(c)); break;
         case 'master': this.master = m.v; break;
@@ -153,9 +177,9 @@ export function defineHost(MACHINES, name = 'retrosynths') {
         this.statN = 0;
         const sc = new Float32Array(512);
         for (let i = 0; i < 512; i++) sc[i] = this.scope[(this.si - 512 + i + 1024) & 1023];
-        let voices = 0, max = 0;
-        if (this.cur) this.safe(this.cur, x => { voices = x.activeCount(); max = x.maxVoices ? x.maxVoices() : 0; });
-        this.port.postMessage({ t: 'stat', scope: sc, meter: Array.from(this.meter), peak: this.peak, machine: this.cur, voices, max,
+        let voices = 0, max = 0, vs = null;
+        if (this.cur) this.safe(this.cur, x => { voices = x.activeCount(); max = x.maxVoices ? x.maxVoices() : 0; if (x.voiceState) vs = Array.from(x.voiceState()); });
+        this.port.postMessage({ t: 'stat', scope: sc, meter: Array.from(this.meter), peak: this.peak, machine: this.cur, voices, max, vs,
           programs: this.ch.map(c => c.program), banks: this.ch.map(c => c.bank), drums: this.ch.map(c => c.drum) });
         this.meter.fill(0); this.peak = 0;
       }

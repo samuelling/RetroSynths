@@ -49,22 +49,53 @@
         <div class="row lcd"><span id="songTitle">No song loaded</span><span id="songTime">00:00 / 00:00</span></div>
       </fieldset>
 
-      <fieldset class="group mixer">
-        <legend>Channels <small>(click to mute · double-click to solo)</small></legend>
-        <div id="channels"></div>
-      </fieldset>
-
       <fieldset class="group scopebox">
         <legend>Output</legend>
         <canvas id="scope" width="512" height="96"></canvas>
         <div class="row"><label>Volume <input type="range" id="vol" min="0" max="1.5" step="0.01" value="0.8"></label></div>
       </fieldset>
 
+      <fieldset class="group voices">
+        <legend>Voices <small>(the chip's real channels · click to mute · double-click to solo)</small></legend>
+        <div id="voiceRows"></div>
+      </fieldset>
+
+      <fieldset class="group arrangerbox">
+        <legend>Arranger <small>(how the MIDI file lands on this chip)</small></legend>
+        <div id="arrRows"></div>
+        <div class="row"><button class="btn small" id="arrReset" type="button">All Auto</button><span class="ed-note" id="arrNote"></span></div>
+      </fieldset>
+
+      <fieldset class="group instruments">
+        <legend>Instruments</legend>
+        <div class="inst-wrap">
+          <div class="inst-side">
+            <select id="instList" size="18"></select>
+            <div class="row">
+              <button class="btn small" id="instCopy" type="button" title="Make an editable copy">Copy</button>
+              <button class="btn small" id="instRename" type="button">Rename</button>
+              <button class="btn small" id="instReset" type="button" title="Restore the factory preset">Reset</button>
+              <button class="btn small" id="instDelete" type="button">Delete</button>
+            </div>
+            <div class="row">
+              <button class="btn small" id="kitBtn" type="button">Drum kit…</button>
+              <button class="btn small" id="instExport" type="button" title="Save this machine's instruments to a file">Export</button>
+              <label class="btn small" for="instImport">Import</label>
+              <input type="file" id="instImport" accept=".json" hidden>
+            </div>
+          </div>
+          <div>
+            <div class="inst-head"><b id="instName"></b><span class="kindtag" id="instKind"></span><span class="ed-note" id="instUse"></span></div>
+            <div id="instEditor"></div>
+            <div id="kitPanel" hidden></div>
+          </div>
+        </div>
+      </fieldset>
+
       <fieldset class="group keys">
-        <legend>Keyboard <small>(QWERTY: A W S E D F T G Y H U J K · Z/X octave)</small></legend>
+        <legend>Keyboard <small>(plays the selected instrument · QWERTY: A W S E D F T G Y H U J K · Z/X octave)</small></legend>
         <div class="row">
-          <label>Ch <select id="liveCh"></select></label>
-          <label>Patch <select id="liveProg"></select></label>
+          <span>Playing: <b id="kbInst"></b></span>
           <label>MIDI in <select id="midiIn"><option value="">(click to enable)</option></select></label>
           <span id="octLabel">Oct 4</span>
         </div>
@@ -80,7 +111,7 @@
     <div class="titlebar"><span class="sysbox">&#9644;</span><span class="title">About Old School</span></div>
     <div class="body about-body">
       <p><b>Old School</b> plays music through 8-bit home computers: the Apple IIe with a Mockingboard, Commodore 64 (SID), Atari 2600 (TIA) and 800 (POKEY), ZX Spectrum 128 and MSX (AY / YM2149), and the humble IBM PC speaker.</p>
-      <p>Play a General MIDI file (File… or drop it on the window), the on-screen keys, your QWERTY keyboard, or a Web MIDI keyboard. Each machine runs an emulation of its own sound chip at the chip's native clock, driven by a period-style music driver that squeezes General MIDI into the hardware's few voices — the way game composers had to.</p>
+      <p>Each machine has its <b>own</b> voices and instruments. Pick or edit an instrument and play it on the keyboard (QWERTY, on-screen or Web MIDI). General MIDI files play too: the <b>Arranger</b> shows how each MIDI channel lands on the chip — leave it on Auto or choose any native instrument and voice. Each machine runs an emulation of its own sound chip at the chip's native clock, driven by a period-style music driver that squeezes General MIDI into the hardware's few voices — the way game composers had to.</p>
       <p class="fine">Emulations are written from public hardware documentation (or ported from permissively licensed emulators, see LICENSES). No game, ROM or console sample data is included. Machine names are trademarks of their owners, used only to describe the hardware being emulated.</p>
       <div class="row right"><button class="btn" id="aboutOK">OK</button></div>
     </div>

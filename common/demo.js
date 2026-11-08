@@ -7,7 +7,7 @@ export function demoSong() {
   let seed = 7;
   const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
   const on = (t, ch, n, v, d) => {
-    const tt = t + (ch === 9 ? 0 : (rnd() - 0.5) * 0.006);
+    const tt = Math.max(0.002, t + (ch === 9 ? 0 : (rnd() - 0.5) * 0.006));   // never before the t=0 program changes
     ev.push([tt, 0x90 | ch, n, Math.max(1, Math.min(127, Math.round(v + (rnd() - 0.5) * 10)))]);
     ev.push([tt + d, 0x80 | ch, n, 0]);
   };
