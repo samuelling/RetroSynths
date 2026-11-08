@@ -21,7 +21,7 @@ export const CARRIERS = [[3], [3], [3], [3], [1, 3], [1, 2, 3], [1, 2, 3], [0, 1
 // envelope shapes for PSG overflow
 const PERC = [0.002, 0.6, 0.0, 0.25], SUST = [0.01, 0.4, 0.6, 0.2], PAD = [0.25, 1.0, 0.7, 0.6], PLUCK = [0.002, 0.35, 0.15, 0.15];
 
-export const MELODIC = [
+const MELODIC = [
   // ---- Piano 0-7 ----
   P(4, 4, [1, 36, 31, 9, 3, 5, 7, 3, 1], [1, 0, 31, 6, 2, 3, 7, 3, 2], [3, 52, 31, 12, 3, 6, 8, 7, 1], [1, 8, 31, 5, 2, 2, 7, 7, 2], { psg: PERC }),
   P(4, 5, [1, 30, 31, 9, 3, 5, 7, 3, 1], [1, 0, 31, 6, 2, 3, 7, 3, 2], [3, 44, 31, 12, 3, 6, 8, 7, 1], [1, 6, 31, 5, 2, 2, 7, 7, 2], { psg: PERC }),
@@ -168,5 +168,175 @@ export const MELODIC = [
   P(0, 7, [15, 2, 31, 12, 10, 8, 10], [9, 6, 31, 12, 10, 8, 10], [5, 8, 31, 12, 10, 8, 10], [1, 0, 31, 10, 9, 7, 10], { tr: -12, psg: [0.001, 0.3, 0, 0.2] }),
 ];
 
-/** Percussion notes not covered by DAC or noise use this FM tom patch (pitched by note). */
-export const FM_TOM = MELODIC[117];
+
+// ======================================================================================================
+//  Native preset library (Interface v2). Every preset is plain JSON in the chip's own units.
+//    kind 'fm'    → FM 1-6: alg 0-7, fb 0-7, ams 0-3, pms 0-7, lfo (global LFO rate 0-7, -1 = off),
+//                   vibDelay (frames before PMS is applied), tr (semitones), op[4] = { ar 0-31, d1r 0-31,
+//                   d2r 0-31, rr 0-15, sl 0-15, tl 0-127, ks 0-3, mul 0-15, dt 0-7 (4-7 = -0..-3), am 0/1,
+//                   ssg 0 or 8-15 }, psgEnv = [attack s, decay s, sustain 0-1, release s] when the driver lets
+//                   the PSG take an overflow note.
+//    kind 'psg'   → PSG 1-3: macros (60 Hz frames) vol 0-15 (15 = loudest), arp (semitones), pitch (cents), tr
+//    kind 'noise' → Noise: macros vol 0-15 and noise (SN76489 noise control 0-7: bit 2 white, bits 0-1 rate,
+//                   3 = clocked by PSG 3's period, which then follows the note)
+//    kind 'dac'   → FM 6 in DAC mode: sample, rate (playback-rate factor of 13.3 kHz), gain 0-1, len 0-1,
+//                   keyTrack (follow the note on melodic channels; C4 = rate)
+// ======================================================================================================
+
+const nativeOp = (o) => ({ ar: o.ar, d1r: o.d1r, d2r: o.d2r, rr: o.rr, sl: o.sl, tl: o.tl, ks: o.ks, mul: o.mul, dt: o.dt, am: o.am, ssg: o.ssg });
+function fm(name, category, src, gm, x = {}) {
+  const p = typeof src === 'number' ? MELODIC[src] : src;
+  return { name, category, kind: 'fm', alg: p.alg, fb: p.fb, ams: p.ams || 0, pms: p.pms || 0, lfo: 1, vibDelay: 17,
+    tr: p.tr || 0, op: p.op.map(nativeOp), psgEnv: (p.psg || SUST).slice(), ...x, gm };
+}
+// showcase patches, designed for the chip
+const SLAP = P(4, 6, [1, 24, 31, 12, 6, 6, 9], [1, 0, 31, 8, 4, 3, 9, 0, 1], [4, 34, 31, 18, 9, 10, 9, 3, 1], [1, 4, 31, 7, 3, 4, 9, 7, 1], { psg: PLUCK });
+const STAB = P(4, 5, [1, 22, 31, 9, 3, 4, 9, 3], [1, 2, 31, 5, 2, 2, 9, 3], [1, 24, 31, 9, 3, 4, 9, 7], [1, 2, 31, 5, 2, 2, 9, 7], { psg: SUST });
+const SSGPAD = P(4, 4, [2, 30, 20, 10, 0, 6, 6, 3, 0, 0, 10], [1, 6, 16, 1, 0, 1, 6, 3], [1, 34, 18, 8, 0, 5, 6, 7, 0, 0, 14], [1, 6, 16, 1, 0, 1, 6, 7], { pms: 2, psg: PAD });
+
+const FM_PRESETS = [
+  fm('FM Grand Piano', 'Piano', 0, [0]),
+  fm('FM Bright Piano', 'Piano', 1, [1, 2, 3]),
+  fm('FM Tine E.Piano', 'Piano', 4, [4]),
+  fm('FM DX E.Piano 2', 'Piano', 5, [5]),
+  fm('FM Harpsichord FB6', 'Piano', 6, [6, 15]),
+  fm('FM Clavinet', 'Piano', 7, [7]),
+  fm('FM Celesta', 'Chromatic', 8, [8, 10, 31]),
+  fm('FM Glockenspiel', 'Chromatic', 9, [9, 112]),
+  fm('FM Vibraphone AM', 'Chromatic', 11, [11]),
+  fm('FM Marimba', 'Chromatic', 12, [12, 108]),
+  fm('FM Xylophone', 'Chromatic', 13, [13]),
+  fm('FM Tubular Bell', 'Chromatic', 14, [14, 98]),
+  fm('FM Drawbar Organ ALG7', 'Organ', 16, [16, 17]),
+  fm('FM Rock Organ', 'Organ', 18, [18]),
+  fm('FM Church Organ', 'Organ', 19, [19, 20]),
+  fm('FM Accordion', 'Organ', 21, [21, 23]),
+  fm('FM Harmonica', 'Organ', 22, [22]),
+  fm('FM Nylon Guitar', 'Guitar', 24, [24]),
+  fm('FM Steel Guitar', 'Guitar', 25, [25]),
+  fm('FM Jazz Guitar', 'Guitar', 26, [26, 27]),
+  fm('FM Muted Guitar', 'Guitar', 28, [28]),
+  fm('FM Overdrive Guitar', 'Guitar', 29, [29]),
+  fm('FM Distortion FB7', 'Guitar', 30, [30, 84]),
+  fm('FM Upright Bass', 'Bass', 32, [32]),
+  fm('FM Finger Bass', 'Bass', 33, [33, 34]),
+  fm('FM Fretless Bass', 'Bass', 35, [35]),
+  fm('FM Slap Bass', 'Bass', SLAP, [36, 37]),
+  fm('FM Saw Bass FB7', 'Bass', 38, [38, 39]),
+  fm('FM Solo Violin', 'Strings', 40, [40, 41, 42, 43, 110]),
+  fm('FM Tremolo Strings AM', 'Strings', 44, [44]),
+  fm('FM Pizzicato', 'Strings', 45, [45]),
+  fm('FM Harp', 'Strings', 46, [46]),
+  fm('FM String Section', 'Ensemble', 48, [48, 49]),
+  fm('FM Synth Strings', 'Ensemble', 50, [50, 51]),
+  fm('FM Choir Aah', 'Ensemble', 52, [52, 53, 54, 85, 91]),
+  fm('FM Orchestra Hit ALG7', 'Ensemble', 55, [55]),
+  fm('FM Trumpet', 'Brass', 56, [56, 59]),
+  fm('FM French Horn', 'Brass', 60, [57, 58, 60]),
+  fm('FM Brass Section', 'Brass', 61, [61]),
+  fm('FM Brass Stab', 'Brass', STAB, [62, 63]),
+  fm('FM Saxophone', 'Reed', 65, [64, 65, 66, 67]),
+  fm('FM Oboe', 'Reed', 68, [68, 69, 109, 111]),
+  fm('FM Clarinet', 'Reed', 71, [70, 71]),
+  fm('FM Flute', 'Pipe', 73, [72, 73, 74, 75, 76, 77, 79]),
+  fm('FM Whistle', 'Pipe', 78, [78]),
+  fm('FM Square Lead', 'Lead', 80, [80, 82]),
+  fm('FM Saw Lead FB7', 'Lead', 81, [81, 83, 87]),
+  fm('FM Fifths Lead', 'Lead', 86, [86]),
+  fm('FM Warm Pad', 'Pad', 88, [88, 89, 92]),
+  fm('FM Poly Synth Pad', 'Pad', 90, [90, 94]),
+  fm('FM Metallic Pad', 'Pad', 93, [93, 96]),
+  fm('SSG-EG Sweep Pad', 'Pad', SSGPAD, [95, 99]),
+  fm('FM Soundtrack Pad', 'Pad', 97, [97, 100, 102]),
+  fm('FM Goblin Wobble', 'FX', 101, [101, 103]),
+  fm('FM Sitar FB7', 'Ethnic', 104, [104]),
+  fm('FM Banjo', 'Ethnic', 105, [105, 106]),
+  fm('FM Koto', 'Ethnic', 107, [107]),
+  fm('FM Agogo Bell', 'Percussive', 113, [113]),
+  fm('FM Steel Drum', 'Percussive', 114, [114]),
+  fm('FM Wood Block', 'Percussive', 115, [115]),
+  fm('FM Taiko', 'Percussive', 116, [116, 117, 118, 47]),
+  fm('SSG-EG Reverse Cymbal', 'FX', 119, [119]),
+  fm('FM Breath Noise FB7', 'FX', 121, [120, 121, 122, 125, 126]),
+  fm('FM Bird Chirp', 'FX', 123, [123, 124]),
+  fm('FM Gunshot FB7', 'FX', 127, [127]),
+];
+
+const mac = (values, loop = -1, release = -1) => ({ values, loop, release });
+const ramp = (a, b, n) => Array.from({ length: n }, (_, i) => Math.round(a + (b - a) * i / Math.max(1, n - 1)));
+const PSG_PRESETS = [
+  { name: 'PSG Square Lead', category: 'PSG', kind: 'psg', tr: 0, vol: mac([15, 14, 13, 12, 9, 6, 3, 0], 3, 4), arp: mac([0]), pitch: mac([0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 8, 4, 0, -4, -8, -4], 8) },
+  { name: 'PSG Square Pluck', category: 'PSG', kind: 'psg', tr: 0, vol: mac(ramp(15, 0, 16)), arp: mac([0]), pitch: mac([0]) },
+  { name: 'PSG Major Arp', category: 'PSG', kind: 'psg', tr: 0, vol: mac([15, 14, 13, 12, 8, 4, 0], 3, 4), arp: mac([0, 0, 4, 4, 7, 7, 12, 12], 0), pitch: mac([0]) },
+  { name: 'PSG Echo Square', category: 'PSG', kind: 'psg', tr: 0, vol: mac([15, 13, 11, 9, 0, 0, 10, 8, 6, 0, 0, 6, 5, 4, 0, 0, 3, 2, 1, 0]), arp: mac([0]), pitch: mac([0]) },
+  { name: 'PSG Square Bass', category: 'PSG', kind: 'psg', tr: 0, vol: mac([15, 15, 14, 13, 12, 6, 0], 4, 5), arp: mac([0]), pitch: mac([0]) },
+];
+// noise hits: level (0 dB = 1) and decay (s to -30 dB) → a vol macro in 2 dB steps
+function noiseHit(name, mode, level, decay, extra = {}) {
+  const v = [];
+  for (let t = 0; ; t++) {
+    const att = (-20 * Math.log10(level) + 30 * (t / 60) / decay) / 2;
+    const x = Math.max(0, 15 - Math.round(att)); v.push(x);
+    if (x === 0 || v.length >= 96) break;
+  }
+  if (v[v.length - 1] !== 0) v.push(0);
+  return { name, category: 'Drums', kind: 'noise', tr: 0, vol: mac(v), noise: mac([mode]), ...extra };
+}
+const NOISE_PRESETS = [
+  noiseHit('Noise Closed Hat', 4, 0.55, 0.045),
+  noiseHit('Noise Open Hat', 4, 0.55, 0.32),
+  noiseHit('Noise Crash', 4, 0.75, 1.2),
+  noiseHit('Noise Ride', 4, 0.45, 0.55),
+  noiseHit('Noise Shaker', 4, 0.45, 0.07),
+  { name: 'Noise Periodic Bass (PSG3 clock)', category: 'PSG', kind: 'noise', tr: 0, vol: mac([15, 15, 14, 14, 13, 8, 0], 4, 5), noise: mac([3]) },
+];
+const dac = (name, sample, rate, gain, len = 1) => ({ name, category: 'Drums', kind: 'dac', sample, rate, gain, len, keyTrack: true });
+const DAC_PRESETS = [
+  dac('DAC Kick', 'kick', 1, 1), dac('DAC Snare', 'snare', 1, 0.95), dac('DAC Hand Clap', 'clap', 1, 0.9), dac('DAC Rimshot', 'rim', 1, 0.8),
+  dac('DAC Low Tom', 'tom', 0.77, 1), dac('DAC Mid Tom', 'tom', 0.98, 1), dac('DAC High Tom', 'tom', 1.25, 1),
+  dac('DAC Cowbell', 'cowbell', 1, 0.75), dac('DAC Conga', 'conga', 1.15, 0.85), dac('DAC Timbale', 'timbale', 1, 0.8),
+  dac('DAC Agogo Bell', 'bell', 1, 0.75), dac('DAC Wood Block', 'block', 1.15, 0.8), dac('DAC Triangle', 'triangle', 1, 0.6),
+  dac('DAC Whistle', 'whistle', 1, 0.6), dac('DAC Guiro', 'guiro', 1, 0.7), dac('DAC Cuica', 'cuica', 1, 0.7), dac('DAC Vibraslap', 'vibraslap', 1, 0.7),
+];
+
+export const PRESETS = [...FM_PRESETS, ...PSG_PRESETS, ...NOISE_PRESETS, ...DAC_PRESETS].map(p => { const { gm, ...rest } = p; return rest; });
+const IDX = Object.fromEntries(PRESETS.map((p, i) => [p.name, i]));
+
+/** GM program → preset index (the Auto mapping). */
+export const GM_PRESET = new Int16Array(128).fill(-1);
+for (const p of FM_PRESETS) for (const g of p.gm) GM_PRESET[g] = IDX[p.name];
+for (let g = 0; g < 128; g++) if (GM_PRESET[g] < 0) throw new Error('genesis-bank: GM program ' + g + ' unmapped');
+
+// GM percussion → [preset, rate factor, gain factor, length factor] (factors apply to the Auto kit only, so that
+// tom / conga pairs keep distinct pitches as in the original driver)
+const DRUMS = {
+  35: ['DAC Kick', 0.9], 36: ['DAC Kick'], 37: ['DAC Rimshot'], 38: ['DAC Snare'], 39: ['DAC Hand Clap'], 40: ['DAC Snare', 1.12],
+  41: ['DAC Low Tom', 0.72 / 0.77], 43: ['DAC Low Tom', 0.82 / 0.77], 45: ['DAC Mid Tom', 0.93 / 0.98], 47: ['DAC Mid Tom', 1.04 / 0.98],
+  48: ['DAC High Tom', 1.18 / 1.25], 50: ['DAC High Tom', 1.33 / 1.25],
+  42: ['Noise Closed Hat'], 44: ['Noise Closed Hat', 1, 0.8], 46: ['Noise Open Hat'],
+  49: ['Noise Crash'], 52: ['Noise Crash', 1, 0.93], 55: ['Noise Crash', 1, 0.87], 57: ['Noise Crash'],
+  51: ['Noise Ride'], 59: ['Noise Ride', 1, 0.93], 53: ['DAC Agogo Bell', 1.35, 0.93],
+  54: ['Noise Shaker', 1, 1.1], 69: ['Noise Shaker', 1, 0.9], 70: ['Noise Shaker', 1, 0.93], 82: ['Noise Shaker', 1, 0.9],
+  56: ['DAC Cowbell'], 58: ['DAC Vibraslap'],
+  60: ['DAC Conga', 1.45 / 1.15], 61: ['DAC Conga', 1.2 / 1.15], 62: ['DAC Conga', 1.08 / 1.15, 0.94, 0.35], 63: ['DAC Conga', 1.05 / 1.15], 64: ['DAC Conga', 0.85 / 1.15],
+  65: ['DAC Timbale', 1.1], 66: ['DAC Timbale', 0.85], 67: ['DAC Agogo Bell'], 68: ['DAC Agogo Bell', 0.82],
+  71: ['DAC Whistle', 1, 1, 0.3], 72: ['DAC Whistle'], 73: ['DAC Guiro', 1, 1, 0.4], 74: ['DAC Guiro'],
+  75: ['DAC Wood Block', 1.6 / 1.15], 76: ['DAC Wood Block'], 77: ['DAC Wood Block', 0.92 / 1.15],
+  78: ['DAC Cuica', 1.1, 1, 0.45], 79: ['DAC Cuica', 0.95], 80: ['DAC Triangle', 1, 1, 0.15], 81: ['DAC Triangle'],
+};
+/** GM drum note → preset index (-1 = silent). Notes outside the GM kit fall back to kick / wood block. */
+export function gmDrumPreset(n) {
+  const d = DRUMS[n];
+  if (d) return IDX[d[0]];
+  if (n >= 24 && n < 35) return IDX['DAC Kick'];
+  if (n > 81 && n <= 90) return IDX['DAC Wood Block'];
+  return -1;
+}
+/** Auto-kit per-note factors [rate, gain, len]. */
+export function autoDrumFine(n) {
+  const d = DRUMS[n];
+  if (d) return [d[1] || 1, d[2] || 1, d[3] || 1];
+  if (n >= 24 && n < 35) return [0.8 + (n - 27) * 0.02, 0.8, 1];
+  if (n > 81 && n <= 90) return [0.9 + ((n * 7) % 10) * 0.06, 0.75, 1];
+  return [1, 1, 1];
+}
