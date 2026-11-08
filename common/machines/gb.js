@@ -1,270 +1,243 @@
-// Game Boy (DMG) — Sharp LR35902 APU with a frame-rate General MIDI sound driver.
+// Game Boy (DMG) — Sharp LR35902 APU played through native instruments by a frame-rate sound driver.
 //
 // Chip: gb-apu.js, cycle-exact at 4.194304 MHz (pulse ×2 with CH1 sweep, 32×4-bit wave, 15/7-bit
 // noise, 512 Hz frame sequencer, DACs with negative slope, NR50/NR51 mixer). Output is integrated
 // over 16 T-cycles (262,144 Hz), passed through the DMG output capacitor high-pass
 // (charge factor 0.999958 per T-cycle) and band-limited to the output rate.
-// Driver (nes-gb-driver.js + below): every LCD frame (59.73 Hz) it writes NR10-NR52 like a game's
-// music engine. Volumes use the hardware envelope: each note is triggered with an initial volume and
-// an envelope direction/pace planned from the instrument's software ADSR, and re-triggered only when
-// the hardware drifts from the plan. Bass (or the lowest free part) goes to the wave channel with an
-// original 4-bit waveform per instrument family; drums are noise-channel macros (NR43 per frame).
-// GM pan is hard L / both / R through NR51.
+// Instruments (gb-presets.js) are in register terms: NRx2 hardware envelopes (plus an optional second
+// envelope re-triggered mid-note and a release envelope), NR10 sweep, NRx1 duty/length, wave RAM +
+// NR32 level, NR43 polynomial-counter macros, NR51 pan, and tracker macros (arp/pitch/duty/pan).
+// The driver (nes-gb-driver.js) steps them every LCD frame (59.73 Hz) and allocates parts to
+// Pulse 1/2, Wave and Noise; this module writes NR10-NR52 from the result.
 
-import { midiHz, Resampler, TOM_NOTE } from './util.js';
+import { midiHz, Resampler } from './util.js';
 import { GBAPU, GB_CLOCK, GB_FRAME } from './gb-apu.js';
-import { Driver, chipLevel } from './nes-gb-driver.js';
+import { Driver, hasMacro, macroLoops, M_VOL, M_X, M_PAN } from './nes-gb-driver.js';
+import { PRESETS, GM_MAP, gmDrum as GM_DRUM, POLY, polyNear, WAVES } from './gb-presets.js';
 
 const D = 16;
 const IRATE = GB_CLOCK / D;
+const FPS = GB_CLOCK / GB_FRAME;
+const clone = (o) => JSON.parse(JSON.stringify(o));
+const PANB = { L: 0x10, R: 0x01, LR: 0x11 };
+const panGM = (pan) => (pan < 43 ? 0x10 : pan > 85 ? 0x01 : 0x11);
 
-// ------------------------------------------------------------------------------------------------
-//  Wave RAM patterns: original designs from harmonic recipes, quantized to 32 × 4 bits.
-// ------------------------------------------------------------------------------------------------
-function waveFrom(h, ph = []) {
-  const y = new Float64Array(32);
-  for (let k = 0; k < 32; k++) for (let n = 0; n < h.length; n++) if (h[n]) y[k] += h[n] * Math.sin(2 * Math.PI * (n + 1) * k / 32 + (ph[n] || 0));
-  let lo = Infinity, hi = -Infinity; for (const v of y) { if (v < lo) lo = v; if (v > hi) hi = v; }
-  const b = new Uint8Array(16);
-  for (let k = 0; k < 32; k++) { const q = Math.round((y[k] - lo) / (hi - lo) * 15); b[k >> 1] |= k & 1 ? q : q << 4; }
-  return b;
-}
-const fromSamples = (s) => { const b = new Uint8Array(16); for (let k = 0; k < 32; k++) b[k >> 1] |= k & 1 ? s[k] : s[k] << 4; return b; };
-const WAVES = {
-  sine: waveFrom([1]),
-  pulse: fromSamples(Array.from({ length: 32 }, (_, k) => (k < 8 ? 15 : 0))),
-  square: fromSamples(Array.from({ length: 32 }, (_, k) => (k < 16 ? 15 : 0))),
-  saw: fromSamples(Array.from({ length: 32 }, (_, k) => 15 - (k >> 1))),
-  piano: waveFrom([1, 0.45, 0.25, 0.12, 0.08, 0.05]),
-  bell: waveFrom([1, 0, 0.5, 0, 0.35, 0, 0.2]),
-  hollow: waveFrom([1, 0, 0.45, 0, 0, 0, 0.3]),
-  organ: waveFrom([1, 0.7, 0.5, 0, 0.3, 0, 0, 0.25]),
-  guitar: waveFrom([1, 0.6, 0.35, 0.25, 0.15, 0.1, 0.08], [0, 0.4, 0.9, 1.3, 0.2, 0.7]),
-  bass: waveFrom([1, 0.5, 0.15]),
-  bassbright: waveFrom([1, 0.7, 0.5, 0.35, 0.25], [0, 0.3, 0.6, 0.9, 1.2]),
-  synbass: waveFrom([1, 0.5, 0.33, 0.25, 0.2, 0.16, 0.14, 0.12]),
-  cello: waveFrom([1, 0.8, 0.55, 0.4, 0.3, 0.2], [0, 0.5, 1, 1.5, 2, 2.5]),
-  brass: waveFrom([1, 0.85, 0.7, 0.55, 0.4, 0.3, 0.2]),
-  reed: waveFrom([1, 0.1, 0.6, 0.1, 0.4, 0.1, 0.25]),
-  choir: waveFrom([1, 0.35, 0.5, 0.15, 0.2], [0, 1.1, 0.4, 2.0, 0.8]),
-  pad: waveFrom([1, 0.3, 0.15, 0.1]),
-  fx: waveFrom([1, 0, 0.7, 0, 0, 0, 0.3], [0, 0, 1.0, 0, 0, 0, 2.2]),
-};
-
-// NR43 value whose LFSR clock is nearest `clock` Hz (w = 7-bit mode)
-function nr43For(clock, w) {
-  let best = 0, be = Infinity;
-  for (let s = 0; s < 14; s++) for (let r = 0; r < 8; r++) {
-    const c = 524288 / (r || 0.5) / (1 << s), e = Math.abs(Math.log(c / clock));
-    if (e < be) { be = e; best = (s << 4) | (w << 3) | r; }
-  }
-  return best;
-}
-// tonal 7-bit noise: the 127-step sequence repeats at clock/127 Hz
-const tone7 = (note) => nr43For(127 * midiHz(note), 1);
-
-// GM drum → { v: initial volume, p: envelope pace (decrease), seq: NR43 per frame, n: frames, prio, re: retrigger frames }
-function drumDef(note) {
-  const X = (v, p, seq, n, o = {}) => ({ v, p, seq, n, prio: 3, ...o });
-  const tom = (nn, v = 13) => X(v, 2, [tone7(nn + 7), tone7(nn + 3), tone7(nn), tone7(nn - 3), tone7(nn - 5)], 14, { prio: 5 });
-  switch (note) {
-    case 35: return X(15, 1, [tone7(50), tone7(41), tone7(35), tone7(30), tone7(26)], 9, { prio: 4 });
-    case 36: return X(15, 1, [0x30, tone7(48), tone7(40), tone7(34), tone7(29)], 9, { prio: 4 });
-    case 37: return X(12, 1, [0x10], 3, { prio: 5 });
-    case 38: return X(14, 1, [0x21, 0x22, 0x32], 14, { prio: 6 });
-    case 40: return X(15, 1, [0x11, 0x21, 0x22], 14, { prio: 6 });
-    case 39: return X(13, 1, [0x21, 0x21, 0x31], 12, { prio: 6, re: [2, 4] });
-    case 42: return X(9, 1, [0x00], 3, { prio: 2 });
-    case 44: return X(7, 1, [0x01], 3, { prio: 2 });
-    case 46: return X(10, 3, [0x00], 30);
-    case 41: case 43: case 45: case 47: case 48: case 50: return tom(TOM_NOTE[note]);
-    case 49: return X(13, 6, [0x10, 0x20], 70, { prio: 5 });
-    case 57: return X(13, 6, [0x20, 0x21], 70, { prio: 5 });
-    case 52: return X(12, 5, [0x18, 0x20], 60, { prio: 5 });
-    case 55: return X(11, 4, [0x10], 40, { prio: 5 });
-    case 51: return X(8, 4, [0x09, 0x01], 40);
-    case 59: return X(8, 4, [0x0A, 0x02], 40);
-    case 53: return X(10, 4, [0x0A], 40);
-    case 54: return X(8, 1, [0x00], 5, { re: [2] });
-    case 69: return X(7, 1, [0x01], 3);
-    case 70: return X(8, 1, [0x00], 3);
-    case 56: return X(10, 2, [tone7(79)], 14);
-    case 67: return X(10, 2, [tone7(84)], 12);
-    case 68: return X(10, 2, [tone7(79)], 12);
-    case 58: return X(10, 3, [0x31], 30, { re: [3, 6, 9, 12] });
-    case 60: case 61: case 62: case 63: case 64: case 65: case 66: return tom(TOM_NOTE[note], 11);
-    case 71: return X(7, 2, [tone7(96)], 12);
-    case 72: return X(7, 4, [tone7(96)], 30);
-    case 73: return X(9, 1, [0x40], 6, { re: [2, 4] });
-    case 74: return X(9, 2, [0x40], 16, { re: [2, 4, 6, 8, 10, 12] });
-    case 75: return X(11, 1, [tone7(96)], 3, { prio: 4 });
-    case 76: return X(11, 1, [tone7(86)], 3, { prio: 4 });
-    case 77: return X(11, 1, [tone7(81)], 3, { prio: 4 });
-    case 78: return X(9, 2, [tone7(76), tone7(81)], 8);
-    case 79: return X(9, 2, [tone7(81), tone7(74)], 8);
-    case 80: return X(7, 1, [0x08], 4);
-    case 81: return X(7, 5, [0x08], 40);
-    default: return X(10, 1, [0x22], 6);
-  }
-}
-const DRUMS = []; for (let n = 0; n < 128; n++) DRUMS.push(drumDef(n < 35 || n > 81 ? 0 : n));
-
-const panBits = (pan) => (pan < 43 ? 0x10 : pan > 85 ? 0x01 : 0x11);   // L / R / both (per channel, shifted)
+const VOICES = [
+  { id: 'p1', name: 'Pulse 1', kind: 'pulse' },
+  { id: 'p2', name: 'Pulse 2', kind: 'pulse' },
+  { id: 'wave', name: 'Wave', kind: 'wave' },
+  { id: 'noise', name: 'Noise', kind: 'noise' },
+];
 
 export default class GB {
   static info = {
     id: 'gb', name: 'Game Boy', maker: 'Nintendo', year: 1989,
     chip: 'Sharp LR35902 APU (DMG)', voices: '2 pulse · 4-bit wave · noise',
-    spec: 'DMG APU at 4.19 MHz, hard-panned stereo, output capacitor · 60 Hz driver with hardware envelopes, wave-channel bass, noise drums',
+    spec: 'DMG APU at 4.19 MHz, hard-panned stereo, output capacitor · 60 Hz driver with hardware envelopes, wave RAM, noise macros',
   };
   static options = [
     { key: 'arp', label: 'Chord arps', choices: [[true, 'On'], [false, 'Off']], default: true },
     { key: 'pan', label: 'Panning', choices: [['hard', 'Hard L/R'], ['mono', 'Mono']], default: 'hard' },
   ];
+  static voices = VOICES;
+  static presets = PRESETS;
+  static poly = POLY;
+  static waves = WAVES;
+  static gmPreset(program) { return GM_MAP[program & 127]; }
+  static gmDrum(note) { return GM_DRUM(note); }
 
   constructor(host) {
     this.h = host;
     this.apu = new GBAPU();
-    this.drv = new Driver(host, { fps: GB_CLOCK / GB_FRAME, pulses: 2, bass: true, noise: true });
+    this.table = clone(PRESETS);
+    const self = this;
+    this.drv = new Driver(host, {
+      fps: FPS, voices: VOICES, kinds: ['pulse', 'wave', 'noise'], overflow: [['wave', 'pulse']], table: this.table,
+      gmPreset: GB.gmPreset, gmDrum: GB.gmDrum,
+      hooks: {
+        start: (n, I) => self.noteStart(n, I),
+        step: (n, I, d) => self.noteStep(n, I, d),
+        release: (n, I) => self.noteRelease(n, I),
+        drumHolds: (I) => !!I && (I.kind === 'wave' ? macroLoops(I.lvlMac) : (I.env && I.env.pace === 0 && I.env.vol > 0 && !(I.len > 0))),
+      },
+    });
     this.rs = new Resampler(IRATE, host.sampleRate);
     this.charge = Math.pow(0.999958, D);
     this.capL = 0; this.capR = 0;
     this.gain = 0.157; this.panMode = 'hard';
     this.sh = new Int32Array(32).fill(-1);
-    this.mode = new Int8Array(4); this.pend = new Uint8Array(4);
-    this.drum = { on: false, def: null, f: 0, lvl: 0, ch: 9 };
-    this.hits = []; this.fpos = 0; this.flush = false;
+    this.loaded = new Int8Array(32).fill(-1);
     this.pans = new Uint8Array(4).fill(0x11);
+    this.vmute = 0; this.vs = new Float32Array(VOICES.length * 4);
+    this.fpos = 0; this.flush = false;
     this.reset();
   }
   w(a, v) { this.apu.write(a, v); }
   reset() {
     this.apu.reset(); this.drv.reset();
-    this.sh.fill(-1); this.mode.fill(0); this.pend.fill(0); this.pans.fill(0x11);
-    this.drum.on = false; this.hits.length = 0; this.waveId = null;
+    this.sh.fill(-1); this.pans.fill(0x11); this.loaded.fill(-1);
     this.w(0xFF26, 0x80); this.w(0xFF24, 0x77); this.w(0xFF25, 0xFF);
     this.w(0xFF10, 0x00); this.w(0xFF11, 0x80); this.w(0xFF12, 0x08); this.w(0xFF16, 0x80); this.w(0xFF17, 0x08);
     this.w(0xFF1A, 0x00); this.w(0xFF1C, 0x00); this.w(0xFF21, 0x08);
-    // let the output capacitor start settled
-    const o = this.apu.sample(D); this.capL = o[0]; this.capR = o[1];
+    const o = this.apu.sample(D); this.capL = o[0]; this.capR = o[1];   // output capacitor starts settled
   }
   setOption(k, v) {
     if (k === 'arp') this.drv.arp = !!v;
     else if (k === 'pan') this.panMode = v === 'mono' ? 'mono' : 'hard';
   }
+  // ---------------------------------------------------------------- v2: native instruments
+  setInstruments(list) { this.table = list.map(x => x); this.drv.table = this.table; }
+  updateInstrument(i, inst) { if (i >= 0) this.table[i] = inst; }
+  setArrangement(arr) { for (let c = 0; c < 16; c++) this.drv.arr[c] = arr && arr[c] ? { inst: arr[c].inst | 0, voice: arr[c].voice || 'auto' } : { inst: -1, voice: 'auto' }; }
+  setKit(kit) { this.drv.kit = kit || {}; }
+  setVoiceMute(mask) { this.vmute = mask | 0; this.flush = true; }
+  voiceState() {
+    const vs = this.vs, V = this.drv.voices, A = this.apu, chans = [A.c1, A.c2, A.c3, A.c4];
+    for (let i = 0; i < V.length; i++) {
+      const v = V[i], c = chans[i];
+      const lvl = !c.on ? 0 : i === 2 ? [0, 1, 0.5, 0.25][c.lvl] : c.vol / 15;
+      const on = v.on && lvl > 0 && !((this.vmute >> i) & 1);
+      vs[i * 4] = on ? lvl : 0; vs[i * 4 + 1] = on ? v.ch : -1; vs[i * 4 + 2] = on ? Math.round(v.note) : -1; vs[i * 4 + 3] = on ? v.ii : -1;
+    }
+    return vs;
+  }
+
+  // ---------------------------------------------------------------- driver hooks: a model of the hardware envelope per note
+  noteStart(n, I) {
+    n.fading = false; n.fv = 0; n.ft = 0; n.e2 = false; n.e2W = false; n.relP = false; n.relW = false;
+    if (I.kind === 'wave') return;
+    const e = I.env || { vol: 15, dir: 0, pace: 0 };
+    n.hv = e.vol; n.hd = e.dir; n.hp = e.pace; n.hacc = 0;
+    n.lenF = I.len > 0 ? Math.max(1, Math.round(I.len * FPS / 256)) : 0;
+  }
+  noteStep(n, I, d) {
+    const pv = d.mval(I.panMac, n, M_PAN); n.panV = pv == null ? 0 : pv;
+    if (I.kind === 'wave') {
+      const lv = d.mval(I.lvlMac, n, M_VOL);
+      let L = lv == null ? (I.level == null ? 3 : I.level) : lv;
+      if (n.fading) { if (++n.ft >= Math.max(1, I.fade | 0)) { n.ft = 0; n.fv--; } L = Math.min(L, n.fv); if (n.fv <= 0) n.dead = true; }
+      n.vol15 = Math.max(0, L) * 5;
+      if (L <= 0 && d.macroDone(I.lvlMac, n, M_VOL)) n.dead = true;
+      return;
+    }
+    if (I.kind === 'noise') { const x = d.mval(I.poly, n, M_X); if (x != null) n.x = x; }
+    const e2 = I.env2;
+    if (e2 && e2.at > 0 && n.t === e2.at && !n.released) { n.hv = e2.vol; n.hd = e2.dir; n.hp = e2.pace; n.hacc = 0; n.e2 = true; }
+    if (n.hp > 0) {                                           // the APU envelope ticks at 64 Hz
+      n.hacc += 64 / FPS;
+      while (n.hacc >= n.hp) { n.hacc -= n.hp; if (n.hd) { if (n.hv < 15) n.hv++; } else if (n.hv > 0) n.hv--; }
+    }
+    n.vol15 = n.hv;
+    if (n.lenF && n.t >= n.lenF) n.dead = true;
+    const pendingE2 = e2 && e2.at > n.t && !n.released;
+    if (n.hv === 0 && !(n.hd && n.hp) && !pendingE2 && n.t > 0) n.dead = true;
+  }
+  noteRelease(n, I) {
+    if (I.kind === 'wave') {
+      if (hasMacro(I.lvlMac) && I.lvlMac.release >= 0) return;
+      if ((I.fade | 0) > 0) { n.fading = true; n.fv = Math.round(n.vol15 / 5); n.ft = 0; } else n.dead = true;
+      return;
+    }
+    const r = I.rel == null ? 0 : I.rel;
+    if (r === 0) { n.dead = true; return; }
+    if (r < 0) { if (n.hd || !n.hp) n.dead = true; return; }   // "ring": only meaningful while the envelope decays
+    n.hd = 0; n.hp = r; n.hacc = 0; n.relP = true;
+  }
 
   // ---------------------------------------------------------------- MIDI
-  noteOn(c, note, vel) {
-    if (this.h.ch[c].drum) { if (!this.h.mute[c]) this.hits.push(c, note, vel); return; }
-    this.drv.noteOn(c, note, vel);
-  }
-  noteOff(c, note) { if (!this.h.ch[c].drum) this.drv.noteOff(c, note); }
+  noteOn(c, note, vel) { this.drv.noteOn(c, note, vel); }
+  noteOff(c, note) { this.drv.noteOff(c, note); }
   sustainOff(c) { this.drv.sustainOff(c); }
-  allOff(c, hard) { this.drv.allOff(c, hard); if (hard) { if (this.drum.ch === c) this.drum.on = false; this.flush = true; } }
+  allOff(c, hard) { this.drv.allOff(c, hard); if (hard) this.flush = true; }
   pitch() {}
   ctrl(c) { if (this.h.mute[c]) this.flush = true; }
 
   // ---------------------------------------------------------------- driver → registers, once per frame
   frame() {
     const drv = this.drv; drv.tick();
-    const [p1, p2] = drv.pulses;
-    this.pulse(p1, 0); this.pulse(p2, 1);
-    this.waveCh(drv.bassV);
-    this.noise(drv.noiseV);
-    // NR51: hard pan per chip channel from the MIDI part it is playing
+    const V = drv.voices;
+    this.pulse(V[0], 0); this.pulse(V[1], 1); this.waveCh(V[2]); this.noise(V[3]);
     let nr51 = 0;
-    const vs = [p1, p2, drv.bassV];
-    for (let i = 0; i < 3; i++) if (vs[i].on && vs[i].part >= 0) this.pans[i] = panBits(this.h.ch[vs[i].part].pan);
-    if (this.drum.on) this.pans[3] = panBits(this.h.ch[this.drum.ch].pan);
-    else if (drv.noiseV.on && drv.noiseV.part >= 0) this.pans[3] = panBits(this.h.ch[drv.noiseV.part].pan);
-    for (let i = 0; i < 4; i++) nr51 |= (this.panMode === 'mono' ? 0x11 : this.pans[i]) << i;
+    for (let i = 0; i < 4; i++) {
+      const v = V[i];
+      if (v.on && v.lead) {
+        const I = v.I, pm = v.lead.panV;
+        this.pans[i] = pm >= 1 && pm <= 3 ? [0, 0x10, 0x01, 0x11][pm] : I && PANB[I.pan] ? PANB[I.pan] : panGM(this.h.ch[v.ch].pan);
+      }
+      nr51 |= (this.panMode === 'mono' ? 0x11 : this.pans[i]) << i;
+    }
     if (nr51 !== this.sh[31]) { this.w(0xFF25, nr51); this.sh[31] = nr51; }
     const m = this.h.meter;
-    for (const v of drv.voices) if (v.on && v.vol > 0) { const g = v.vol / 15; if (g > m[v.ch]) m[v.ch] = g; }
+    for (let i = 0; i < 4; i++) { const v = V[i]; if (v.on && v.ch >= 0 && !((this.vmute >> i) & 1) && v.vol / 15 > m[v.ch]) m[v.ch] = v.vol / 15; }
   }
-  // hardware envelope plan from the software envelope slope (4-bit units per second)
-  envBits(dvdt) {
-    if (Math.abs(dvdt) < 4.5) return 0;
-    const pace = Math.max(1, Math.min(7, Math.round(64 / Math.abs(dvdt))));
-    return dvdt > 0 ? 0x08 | pace : pace;
+  nrx2(e, L) { const v = ((this.scaled(e.vol, L) << 4) | (e.dir ? 8 : 0) | (e.pace & 7)) & 0xFF; return (v & 0xF8) ? v : 0x08; }   // keep the DAC on
+  scaled(vol, L) { return vol > 0 ? Math.max(1, Math.min(15, Math.round(vol * L))) : 0; }
+  // NRx2 / trigger logic shared by the pulses and noise: note-on, second envelope, release envelope
+  envWrites(v, nrx2, trigger, chan) {
+    const n = v.lead, I = v.I;
+    if (v.trig) {
+      const e = I.env || { vol: 15, dir: 0, pace: 0 };
+      this.w(nrx2, this.nrx2(e, n.L)); trigger(); return;
+    }
+    if (n.e2 && !n.e2W) {
+      n.e2W = true; this.w(nrx2, this.nrx2(I.env2, n.L)); trigger(); return;
+    }
+    if (n.relP && !n.relW) {
+      n.relW = true;
+      if (chan.on && chan.vol > 0) { this.w(nrx2, (chan.vol << 4) | ((I.rel | 0) & 7)); trigger(); }
+    }
   }
-  // re-plan only when the envelope reverses, or a held level starts moving fast; slow drifts are
-  // corrected by the |target − hardware| ≥ 2 rule
-  flip(dir, cur, dvdt) { return dir !== 0 && dir !== cur && (cur !== 0 || Math.abs(dvdt) >= 9); }
+  cut(nrx2, nrx4, chan) { if (chan.on && chan.vol > 0) { this.w(nrx2, 0x08); this.w(nrx4, 0x80); } }
   pulse(v, i) {
     const sh = this.sh, k = i * 6, b = i ? 0xFF16 : 0xFF11, c = i ? this.apu.c2 : this.apu.c1;
-    const target = v.on ? v.vol : 0;
-    if (v.trig) this.pend[i] = 1;
-    if (target > 0) {
-      let f = midiHz(v.note); while (f < 64.1) f *= 2;
-      const x = Math.max(0, Math.min(2047, Math.round(2048 - 131072 / f)));
-      const d = v.duty << 6;
-      if (d !== sh[k]) { this.w(b, d); sh[k] = d; }
-      const lo = x & 0xFF, hi = x >> 8;
-      if (lo !== sh[k + 1]) { this.w(b + 2, lo); sh[k + 1] = lo; }
-      const eb = this.envBits(v.dvdt), dir = eb ? (eb & 8 ? 1 : -1) : 0;
-      const cur = c.on ? c.vol : 0;
-      if (this.pend[i] || !c.on || Math.abs(target - cur) >= 2 || this.flip(dir, this.mode[i], v.dvdt)) {
-        this.w(b + 1, (target << 4) | eb); this.w(b + 3, 0x80 | hi);
-        this.mode[i] = dir; sh[k + 2] = hi; this.pend[i] = 0;
-      } else if (hi !== sh[k + 2]) { this.w(b + 3, hi); sh[k + 2] = hi; }
-    } else if (c.on && c.vol > 0) {
-      this.w(b + 1, 0x08); this.w(b + 3, 0x80 | Math.max(0, sh[k + 2])); this.mode[i] = 0;   // cut: volume 0, DAC stays on
+    if (!v.on || !v.lead || ((this.vmute >> i) & 1)) { this.cut(b + 1, b + 3, c); return; }
+    const I = v.I;
+    let f = midiHz(v.note); while (f < 64.1) f *= 2;
+    const x = Math.max(0, Math.min(2047, Math.round(2048 - 131072 / f) + Math.round(v.pacc)));
+    const lenOn = I.len > 0 ? 0x40 : 0;
+    const r1 = ((v.duty & 3) << 6) | (lenOn ? (64 - Math.min(64, I.len)) & 63 : 0);
+    if (r1 !== sh[k] || (v.trig && lenOn)) { this.w(b, r1); sh[k] = r1; }
+    const lo = x & 0xFF, hi = x >> 8;
+    if (lo !== sh[k + 1]) { this.w(b + 2, lo); sh[k + 1] = lo; }
+    if (v.trig && i === 0) {
+      const s = I.sweep, r10 = s && (s.pace || s.shift) ? ((s.pace & 7) << 4) | (s.dir ? 8 : 0) | (s.shift & 7) : 0;
+      if (r10 !== sh[k + 4]) { this.w(0xFF10, r10); sh[k + 4] = r10; }
     }
+    let trig = false;
+    this.envWrites(v, b + 1, () => { this.w(b + 3, 0x80 | lenOn | hi); sh[k + 2] = hi; trig = true; }, c);
+    if (!trig && hi !== sh[k + 2]) { this.w(b + 3, lenOn | hi); sh[k + 2] = hi; }
   }
   waveCh(v) {
     const sh = this.sh, c = this.apu.c3;
-    const t = v.on ? v.vol : 0;
-    const code = t >= 10 ? 1 : t >= 5 ? 2 : t >= 2 ? 3 : 0;
-    if (v.trig) this.pend[2] = 1;
-    if (code === 0) { if (sh[20] !== 0) { this.w(0xFF1C, 0); sh[20] = 0; } return; }
-    const id = WAVES[v.inst.wave] ? v.inst.wave : 'bass';
-    if (id !== this.waveId) {                                   // wave RAM is only written with the DAC off
+    const nat = !v.on || ((this.vmute >> 2) & 1) ? 0 : v.vol >= 11 ? 3 : v.vol >= 6 ? 2 : v.vol >= 2 ? 1 : 0;
+    if (!nat) { if (sh[20] !== 0) { this.w(0xFF1C, 0); sh[20] = 0; } return; }
+    const I = v.I, data = v.over ? (WAVES[I.wave] || WAVES.pulse) : (I.wave || WAVES.bass);
+    let same = true; for (let j = 0; j < 32; j++) if (this.loaded[j] !== (data[j] & 15)) { same = false; break; }
+    let trig = v.trig;
+    if (!same) {                                               // wave RAM is only written with the DAC off
       this.w(0xFF1A, 0x00);
-      const wb = WAVES[id]; for (let j = 0; j < 16; j++) this.w(0xFF30 + j, wb[j]);
-      this.w(0xFF1A, 0x80); this.waveId = id; this.pend[2] = 1;
+      for (let j = 0; j < 16; j++) this.w(0xFF30 + j, ((data[2 * j] & 15) << 4) | (data[2 * j + 1] & 15));
+      for (let j = 0; j < 32; j++) this.loaded[j] = data[j] & 15;
+      this.w(0xFF1A, 0x80); trig = true;
     }
     let f = midiHz(v.note); while (f < 32.05) f *= 2;
-    const x = Math.max(0, Math.min(2047, Math.round(2048 - 65536 / f)));
-    const lo = x & 0xFF, hi = x >> 8;
+    const x = Math.max(0, Math.min(2047, Math.round(2048 - 65536 / f) + Math.round(v.over ? v.pacc / 2 : v.pacc)));
+    const lo = x & 0xFF, hi = x >> 8, code = [0, 3, 2, 1][nat] << 5;
     if (lo !== sh[21]) { this.w(0xFF1D, lo); sh[21] = lo; }
-    if (code << 5 !== sh[20]) { this.w(0xFF1C, code << 5); sh[20] = code << 5; }
-    if (this.pend[2] || !c.on) { this.w(0xFF1E, 0x80 | hi); sh[22] = hi; this.pend[2] = 0; }
+    if (code !== sh[20]) { this.w(0xFF1C, code); sh[20] = code; }
+    if (trig || !c.on) { this.w(0xFF1E, 0x80 | hi); sh[22] = hi; }
     else if (hi !== sh[22]) { this.w(0xFF1E, hi); sh[22] = hi; }
   }
-  noise(nv) {
-    const h = this.h, d = this.drum, sh = this.sh, c = this.apu.c4;
-    for (let i = 0; i < this.hits.length; i += 3) {
-      const ch = this.hits[i], note = this.hits[i + 1], vel = this.hits[i + 2];
-      const def = DRUMS[note];
-      const rem = d.on ? d.def.prio * (1 - d.f / d.def.n) : 0;
-      if (!d.on || def.prio >= rem) { d.on = true; d.def = def; d.f = 0; d.lvl = chipLevel(h.ch[ch], vel); d.ch = ch; }
-    }
-    this.hits.length = 0;
-    if (d.on && h.mute[d.ch]) { d.on = false; this.w(0xFF21, 0x08); this.w(0xFF23, 0x80); }
-    if (d.on) {
-      const df = d.def, f = d.f;
-      const n43 = df.seq[Math.min(f, df.seq.length - 1)];
-      if (n43 !== sh[25]) { this.w(0xFF22, n43); sh[25] = n43; }
-      if (f === 0 || (df.re && df.re.includes(f))) {
-        const v0 = Math.max(1, Math.round(df.v * d.lvl * (f ? 0.8 : 1)));
-        this.w(0xFF21, (v0 << 4) | df.p); this.w(0xFF23, 0x80);
-        if (v0 / 15 > h.meter[d.ch]) h.meter[d.ch] = v0 / 15;
-      }
-      if (++d.f >= df.n) { d.on = false; this.w(0xFF21, 0x08); this.w(0xFF23, 0x80); }
-      this.pend[3] = 1; this.mode[3] = 0;
-      return;
-    }
-    const target = nv && nv.on ? nv.vol : 0;
-    if (nv && nv.trig) this.pend[3] = 1;
-    if (target > 0) {
-      const n43 = nr43For(440 * Math.pow(2, (nv.note - 69) / 12) * 64, 0);
-      if (n43 !== sh[25]) { this.w(0xFF22, n43); sh[25] = n43; }
-      const eb = this.envBits(nv.dvdt), dir = eb ? (eb & 8 ? 1 : -1) : 0, cur = c.on ? c.vol : 0;
-      if (this.pend[3] || !c.on || Math.abs(target - cur) >= 2 || this.flip(dir, this.mode[3], nv.dvdt)) {
-        this.w(0xFF21, (target << 4) | eb); this.w(0xFF23, 0x80); this.mode[3] = dir; this.pend[3] = 0;
-      }
-    } else if (c.on && c.vol > 0) { this.w(0xFF21, 0x08); this.w(0xFF23, 0x80); this.mode[3] = 0; }
+  noise(v) {
+    const sh = this.sh, c = this.apu.c4;
+    if (!v.on || !v.lead || ((this.vmute >> 3) & 1)) { this.cut(0xFF21, 0xFF23, c); return; }
+    const I = v.I, w = v.duty & 1;
+    const pi = hasMacro(I.poly) ? Math.max(0, Math.min(POLY.length - 1, v.cur.x | 0)) : polyNear(midiHz(v.note) * (w ? 127 : 64));
+    const P = POLY[pi], n43 = (P.s << 4) | (w << 3) | P.r;
+    if (n43 !== sh[25]) { this.w(0xFF22, n43); sh[25] = n43; }
+    const lenOn = I.len > 0 ? 0x40 : 0;
+    if (v.trig && lenOn) this.w(0xFF20, (64 - Math.min(64, I.len)) & 63);
+    this.envWrites(v, 0xFF21, () => this.w(0xFF23, 0x80 | lenOn), c);
   }
 
   // ---------------------------------------------------------------- audio
@@ -287,11 +260,6 @@ export default class GB {
       L[i] = o[0] * g; R[i] = o[1] * g;
     }
   }
-  activeCount() {
-    let k = 0;
-    for (const v of this.drv.voices) if (v.on && v.vol > 0) k++;
-    if (this.drum.on && !(this.drv.noiseV.on && this.drv.noiseV.vol > 0)) k++;
-    return Math.min(4, k);
-  }
+  activeCount() { let k = 0; const vs = this.voiceState(); for (let i = 0; i < 4; i++) if (vs[i * 4] > 0) k++; return k; }
   maxVoices() { return 4; }
 }
