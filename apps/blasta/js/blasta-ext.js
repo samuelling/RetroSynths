@@ -132,7 +132,6 @@ function typeBoot() {
   let i = 0;
   const step = () => { if (i < BOOT.length) { el.textContent += BOOT[i++] + '\n'; setTimeout(step, i < 3 ? 120 : 160); } };
   step();
-  if (document.body.classList.contains('embed')) $('bootHint').textContent = '▶ Click to power on Blasta';
 }
 
 // ------------------------------------------------------------ sound banks

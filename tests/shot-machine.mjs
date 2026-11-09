@@ -32,7 +32,7 @@ try {
   await page.goto(`http://127.0.0.1:${port}/apps/${group}/index.html?machine=${id}`);
   await page.evaluate(() => localStorage.clear());
   await page.reload();
-  await page.click('#boot');
+  await page.keyboard.press('Shift');
   await page.waitForTimeout(id === 'snes' ? 4000 : group === 'blasta' ? 9000 : 1500);
   await page.click('#btnDemo');
   await page.waitForTimeout(3500);

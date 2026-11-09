@@ -176,6 +176,9 @@ function restore(key) {
   o.win.hidden = false; if (o.minIcon) { o.minIcon.remove(); o.minIcon = null; }
   activate(o.win);
 }
+// a click or key on the desktop also wakes sound in open apps (same origin, so it counts as their gesture)
+const wakeApps = () => document.querySelectorAll('.win iframe').forEach(f => { try { f.contentWindow.retroSynthsWake && f.contentWindow.retroSynthsWake(); } catch {} });
+for (const t of ['pointerdown', 'keydown']) window.addEventListener(t, wakeApps, { capture: true });
 // focus follows clicks inside app iframes
 window.addEventListener('blur', () => setTimeout(() => {
   const f = document.activeElement;

@@ -49,23 +49,30 @@ const PLATES = {
 
 // ------------------------------------------------------------ boot / audio
 $('bootText').textContent = 'C:\\> CD \\RETRO\nC:\\RETRO> ' + APP_NAME.toUpperCase().replace(/\s+/g, '') + '.EXE\n';
-$('bootHint').textContent = embed ? `▶ Click to power on ${APP_NAME}` : 'Click or press any key to power on';
-const powerOn = async () => {
-  window.removeEventListener('keydown', powerOn); $('boot').removeEventListener('pointerdown', powerOn);
-  $('boot').classList.add('gone');
-  await initAudio();
+// No power-on gate: the boot screen is a brief flourish (none inside the desktop), the audio engine
+// loads straight away, and the first click or key anywhere wakes the sound (browsers require one).
+const dismissBoot = () => $('boot').classList.add('gone');
+if (embed) dismissBoot();
+else { $('boot').addEventListener('pointerdown', dismissBoot); setTimeout(dismissBoot, +(document.body.dataset.bootMs || 900)); }
+const wake = () => {
+  if (!ctx) { initAudio(); return; }
+  if (ctx.state !== 'running') ctx.resume().catch(() => {});
 };
-window.addEventListener('keydown', powerOn);
-$('boot').addEventListener('pointerdown', powerOn);
+for (const t of ['pointerdown', 'keydown', 'touchend']) window.addEventListener(t, wake, { capture: true });
+window.retroSynthsWake = wake;                  // the desktop forwards its own clicks here
+const powerOn = () => initAudio();
 
-async function initAudio() {
-  if (ctx) return;
+let audioReady = null;
+function initAudio() { return audioReady || (audioReady = startAudio()); }
+async function startAudio() {
   ctx = new AudioContext({ latencyHint: 'interactive' });
+  ctx.onstatechange = () => document.body.classList.toggle('asleep', ctx.state !== 'running');
+  document.body.classList.toggle('asleep', ctx.state !== 'running');
   await ctx.audioWorklet.addModule('../../common/host-worklet.js');
   node = new AudioWorkletNode(ctx, 'retrosynths', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
   node.connect(ctx.destination);
   node.port.onmessage = (e) => onMsg(e.data);
-  if (ctx.state !== 'running') await ctx.resume();
+  if (ctx.state !== 'running') ctx.resume().catch(() => {});   // runs now if allowed, else on the first click/key
   post({ t: 'master', v: +$('vol').value });
   if (EXT && EXT.beforeAudio) await EXT.beforeAudio();
   await selectMachine(app.id);
@@ -708,3 +715,4 @@ export const API = {
 // initial paint (before power-on)
 if (EXT_URL) { try { EXT = await import(new URL(EXT_URL, document.baseURI).href); if (EXT.init) await EXT.init(API); } catch (err) { console.error(err); setStatus('Extension error: ' + err.message); } }
 loadState(); renderMachine(); buildVoices(); renderArranger(); renderInstList(); selectInst(S.sel, true);
+initAudio().catch(err => { console.error(err); setStatus('Audio error: ' + err.message); });
