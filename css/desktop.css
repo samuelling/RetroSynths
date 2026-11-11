@@ -93,7 +93,15 @@ button.menu { background: none; border: 0; font: inherit; color: #000; }
 .sysmenu button { display: flex; justify-content: space-between; gap: 18px; width: 100%; padding: 2px 18px; background: none; border: 0; font: inherit; color: #000; cursor: pointer; text-align: left; }
 .sysmenu button:hover, .sysmenu button:focus { background: var(--title); color: #fff; outline: none; }
 .sysmenu .acc { opacity: .8; }
+.desk-icons { position: absolute; right: 18px; top: 18px; display: flex; flex-direction: column; gap: 18px; z-index: 1; }
+.desk-icons .icon span, #minimized .icon span { color: #fff; text-shadow: 1px 1px 0 #004040; }
+.desk-icons .icon.sel span, .desk-icons .icon:focus-visible span { background: var(--title); text-shadow: none; }
 .desk-hint { position: fixed; right: 12px; bottom: 8px; margin: 0; color: #fff; font-size: 11px; text-shadow: 1px 1px 0 #004040; pointer-events: none; }
 #dos:focus { outline: none; }
-@media (max-width: 760px) { .desk-hint { display: none; } }
+@media (max-width: 760px) {
+  .desk-hint { display: none; }
+  #progman { height: calc(100% - 92px) !important; }
+  .desk-icons { top: auto; bottom: 4px; left: 0; right: 0; flex-direction: row; justify-content: space-around; gap: 4px; }
+  .desk-icons .icon { width: 30%; }
+}
 @media (prefers-reduced-motion: reduce) { #cursor { animation: none; } }

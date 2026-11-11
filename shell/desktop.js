@@ -83,6 +83,7 @@ OLD SCHOOL  Apple IIe + Mockingboard · Commodore 64 (SID) ·
             IBM PC speaker.
 
 megaZINE    Friends from the zine, running in windows:
+            Their icons sit on the desktop itself:
             Big Apple Sam (a city at night, every window a
             life), Q-Slowdem (a terminal that dials the
             MEGAzine BBS) and Townies (run the real town of
@@ -237,7 +238,7 @@ function closeApp(key) {
   o.win.remove(); if (o.minIcon) o.minIcon.remove();
   open.delete(key);
   if (location.hash === '#' + key) history.replaceState(null, '', location.pathname + location.search);
-  const ic = document.querySelector(`.pm-body .icon[data-key="${key}"]`);
+  const ic = document.querySelector(`#icons .icon[data-key="${key}"], #icons2 .icon[data-key="${key}"]`);
   if (ic && !PM.minIcon) { selectIcon(ic); ic.focus(); }
 }
 function minIcon(key, label, onOpen) {
@@ -288,7 +289,9 @@ function iconEl(key, label) {
   return d;
 }
 function selectIcon(d) {
-  document.querySelectorAll('.icon.sel').forEach(x => { x.classList.remove('sel'); if (x.closest('.pm-body')) x.tabIndex = -1; });
+  document.querySelectorAll('.icon.sel').forEach(x => x.classList.remove('sel'));
+  const grp = d.closest('.icons, .desk-icons');
+  if (grp) grp.querySelectorAll('.icon').forEach(x => { x.tabIndex = -1; });
   d.classList.add('sel'); d.tabIndex = 0;
 }
 function buildGroup(box, keys) {
@@ -299,7 +302,7 @@ function buildGroup(box, keys) {
     ic.ondblclick = () => openApp(key);
     if (touch) ic.onclick = () => openApp(key);
     ic.onkeydown = (e) => {
-      const all = [...document.querySelectorAll('.pm-body .icon')], i = all.indexOf(ic);
+      const all = [...box.querySelectorAll('.icon')], i = all.indexOf(ic);
       const go = (j) => { e.preventDefault(); const t = all[(j + all.length) % all.length]; selectIcon(t); t.focus(); };
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openApp(key); }
       else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') go(i + 1);
@@ -312,6 +315,7 @@ function buildGroup(box, keys) {
 (function buildShelf() {
   buildGroup($('icons'), GROUP1); buildGroup($('icons2'), GROUP2);
   const first = document.querySelector('#icons .icon'); first.tabIndex = 0;
+  document.querySelector('#icons2 .icon').tabIndex = 0;
   const pm = $('progman'); PM.win = pm; pm.dataset.name = 'Program Shelf';
   makeDraggable(pm); activate(pm, false);
   pm.querySelector('.max').onclick = () => toggleMax(pm);
@@ -322,7 +326,7 @@ function buildGroup(box, keys) {
   sys.onclick = () => popMenu(sys, [['Restore', () => toggleMax(pm, false)], ['Minimize', minPM], ['Maximize', () => toggleMax(pm, true)], '-', ['Exit RetroSynths…', exitPrompt, 'Alt+F4']]);
   sys.ondblclick = exitPrompt;
   $('mFile').onclick = () => popMenu($('mFile'), [
-    ['Open', () => { const s = document.querySelector('.pm-body .icon.sel'); if (s) openApp(s.dataset.key); }, 'Enter'],
+    ['Open', () => { const s = document.querySelector('.icon.sel'); if (s) openApp(s.dataset.key); }, 'Enter'],
     '-', ['Exit RetroSynths…', exitPrompt]]);
   $('mWindow').onclick = () => {
     const list = [...open].map(([k, o]) => [APPS[k].title, () => restore(k), '', o.win.classList.contains('active') && !o.minIcon]);
