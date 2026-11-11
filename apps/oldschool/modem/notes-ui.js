@@ -4,6 +4,7 @@
 //   spectro: { use('line'|'notes', label), feed(samples8k) } — the Modem's spectrogram
 import { synthesize, NoteDecoder, frameSeconds, MODES, MODE_KEYS, INTRO_SECONDS } from './notes-core.js';
 import { packNote, unpackNote, PBKDF2_ITERATIONS } from './notes-crypto.js';
+import { SIZES, QUALITY, fitSize, encodeImage, decodeBand, packPhoto, photoSeconds, synthesizePhoto, PhotoReceiver } from './notes-photo.js';
 
 const MAXLEN = 280;
 let uid = 0;
@@ -37,12 +38,24 @@ const pcm16Wav = (x, fs) => {
   for (let i = 0; i < n; i++) b.setInt16(44 + i * 2, Math.max(-32767, Math.min(32767, Math.round(x[i] * 32767))), true);
   return new Blob([b.buffer], { type: 'audio/wav' });
 };
-const fmtS = (s) => s < 10 ? s.toFixed(1) + ' s' : Math.round(s) + ' s';
+const fmtS = (s) => s < 10 ? s.toFixed(1) + ' s' : s < 120 ? Math.round(s) + ' s' : Math.floor(s / 60) + ' min ' + Math.round(s % 60) + ' s';
+/** draw w×h RGBA pixels into a canvas (shown big & crisp by CSS); rows: how many rows are painted (rest dark); scan: row of a bright line */
+function drawPixels(cv, rgba, w, h, rows = h, scan = null) {
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const g = cv.getContext('2d'), im = g.createImageData(w, h);
+  if (rgba) im.data.set(rgba.subarray(0, w * h * 4));
+  const r0 = Math.max(0, Math.min(h, rows | 0));
+  for (let i = r0 * w * 4; i < im.data.length; i += 4) { im.data[i] = 24; im.data[i + 1] = 28; im.data[i + 2] = 24; im.data[i + 3] = 255; }
+  g.putImageData(im, 0, 0);
+  if (scan != null && scan >= 0 && scan < h) { g.fillStyle = 'rgb(120,255,140)'; g.fillRect(0, Math.floor(scan), w, 1); g.fillStyle = 'rgba(120,255,140,0.35)'; g.fillRect(0, Math.floor(scan) - 1, w, 1); }
+}
+const photoBytes = (img, secret) => { // frame payload sizes for the airtime estimate (header, stripes, header again)
+  const hdr = 11 + (secret ? 24 : 0); return [{ payload: { length: hdr } }, ...img.bands.map(b => ({ payload: { length: 4 + b.length + (secret ? 16 : 0) } })), { payload: { length: hdr } }]; };
 
 export function mountNotes(host, { ctx, dest, ready, spectro, setStatus = () => {} }) {
   const id = 'mn' + (++uid);
   const timers = new Set(); const later = (fn, ms) => { const t = setTimeout(() => { timers.delete(t); fn(); }, ms); timers.add(t); return t; };
-  let dead = false, playing = null, listening = null, lastLocked = null, fileBusy = false;
+  let dead = false, playing = null, listening = null, lastLocked = null, fileBusy = false, muteUntil = 0, kind = 'note', pic = null, srcPic = null;
 
   // ------------------------------------------------------------ shared passphrase
   const pass = h('input', { type: 'password', id: id + '-pass', autocomplete: 'off', spellcheck: 'false', class: 'md-field', 'aria-describedby': id + '-passhint' });
@@ -56,8 +69,8 @@ export function mountNotes(host, { ctx, dest, ready, spectro, setStatus = () => 
   const speedBox = h('fieldset', { class: 'md-speed' }, h('legend', { text: 'Speed' }),
     MODE_KEYS.map(k => { const m = MODES[k]; const net = m.baud * m.bps / 16;
       const desc = { sturdy: `slow & sure · MFSK-8, ${m.baud} baud · ~${net.toFixed(0)} bytes/s`, quick: `MFSK-8, ${m.baud} baud · ~${net.toFixed(0)} bytes/s`, classic: `the modem sound · FSK, ${m.baud} baud · ~${net.toFixed(0)} bytes/s` }[k];
-      return h('label', { class: 'chk' }, h('input', { type: 'radio', name: id + '-speed', value: k, checked: k === 'sturdy', onchange: () => updateCount() }), ` ${m.name} `, h('small', { text: `(${desc})` })); }));
-  const intro = h('input', { type: 'checkbox', id: id + '-intro', onchange: () => updateCount() });
+      return h('label', { class: 'chk' }, h('input', { type: 'radio', name: id + '-speed', value: k, checked: k === 'sturdy', onchange: () => { updateCount(); updatePicInfo(); } }), ` ${m.name} `, h('small', { text: `(${desc})` })); }));
+  const intro = h('input', { type: 'checkbox', id: id + '-intro', onchange: () => { updateCount(); updatePicInfo(); } });
   const btnSend = h('button', { type: 'button', class: 'btn', onclick: () => send() }, 'Send');
   const btnStop = h('button', { type: 'button', class: 'btn', disabled: true, onclick: () => stopPlaying() }, 'Stop');
   const btnSave = h('button', { type: 'button', class: 'btn', onclick: () => save() }, 'Save as sound (.wav)');
@@ -65,8 +78,24 @@ export function mountNotes(host, { ctx, dest, ready, spectro, setStatus = () => 
   const vol = h('input', { type: 'range', min: '0.05', max: '1', step: '0.01', value: '0.7', id: id + '-vol', 'aria-label': 'Note playback volume' });
   const speed = () => (host.querySelector(`input[name="${id}-speed"]:checked`) || { value: 'sturdy' }).value;
 
-  const sendBox = h('fieldset', { class: 'group md-send' }, h('legend', { text: 'Send a note' }),
-    h('label', { for: id + '-msg', class: 'md-lab', text: `Message (up to ${MAXLEN} characters)` }), msg, count,
+  // what to send: a note or a photo
+  const kindBox = h('fieldset', { class: 'md-kind' }, h('legend', { text: 'Send' }),
+    ...[['note', 'Note'], ['photo', 'Photo']].map(([v, t]) => h('label', { class: 'chk' }, h('input', { type: 'radio', name: id + '-kind', value: v, checked: v === 'note', onchange: () => setKind(v) }), ' ' + t)));
+  const notePart = h('div', { class: 'md-notepart' }, h('label', { for: id + '-msg', class: 'md-lab', text: `Message (up to ${MAXLEN} characters)` }), msg, count);
+  const picIn = h('input', { type: 'file', accept: 'image/*', hidden: true, onchange: () => { if (picIn.files[0]) loadPicture(picIn.files[0]); picIn.value = ''; } });
+  const btnPick = h('button', { type: 'button', class: 'btn', onclick: () => picIn.click() }, 'Choose picture…');
+  const selSize = h('select', { id: id + '-psize', onchange: () => reencode() }, Object.entries(SIZES).map(([k, v]) => h('option', { value: k, text: `${k[0].toUpperCase() + k.slice(1)} (${v} px)` })));
+  const selDetail = h('select', { id: id + '-pdetail', onchange: () => reencode() }, Object.keys(QUALITY).map(k => h('option', { value: k, text: k[0].toUpperCase() + k.slice(1) })));
+  selSize.value = 'small'; selDetail.value = 'medium';
+  const prevCv = h('canvas', { class: 'md-photo md-preview', width: '8', height: '8', role: 'img', 'aria-label': 'Photo preview: no picture chosen yet' });
+  const picInfo = h('div', { class: 'md-hint', id: id + '-picinfo', 'aria-live': 'polite', text: 'No picture chosen.' });
+  const photoPart = h('div', { class: 'md-photopart', hidden: true },
+    h('div', { class: 'row' }, btnPick, picIn,
+      h('label', { for: id + '-psize', text: 'Size' }), selSize, h('label', { for: id + '-pdetail', text: 'Detail' }), selDetail),
+    prevCv, picInfo,
+    h('p', { class: 'md-hint', text: 'The preview is decoded from the stripes that will be sent, so it is exactly what arrives. Photos paint in from the top as each 16-pixel stripe lands.' }));
+  const sendBox = h('fieldset', { class: 'group md-send' }, h('legend', { text: 'Send a note or photo' }),
+    kindBox, notePart, photoPart,
     speedBox,
     h('div', { class: 'row' }, h('label', { class: 'chk' }, intro, ' Fake handshake intro'), h('small', { class: 'md-hint', text: '(a dial-up flourish first; the receiver ignores it)' })),
     h('div', { class: 'row' }, h('label', { for: id + '-vol', text: 'Volume' }), vol),
@@ -84,7 +113,8 @@ export function mountNotes(host, { ctx, dest, ready, spectro, setStatus = () => 
   const listenStatus = h('div', { class: 'md-status', role: 'status' });
   const result = h('div', { class: 'md-result', 'aria-live': 'assertive', 'aria-atomic': 'true' });
   const btnRetry = h('button', { type: 'button', class: 'btn small', hidden: true, onclick: () => retryLocked() }, 'Try passphrase again');
-  const inbox = h('ol', { class: 'md-inbox', 'aria-label': 'Received notes, newest first', reversed: true });
+  const inbox = h('ol', { class: 'md-inbox', 'aria-label': 'Received notes and photos, newest first', reversed: true });
+  const details = h('details', { class: 'md-details' }, h('summary', { text: 'Received notes' }), inbox);
   const listenBox = h('fieldset', { class: 'group md-listen' }, h('legend', { text: 'Listen' }),
     h('div', { class: 'row' }, btnListen, btnFile, fileIn),
     h('div', { class: 'md-grid' },
@@ -92,7 +122,7 @@ export function mountNotes(host, { ctx, dest, ready, spectro, setStatus = () => 
       h('span', { text: 'Carrier' }), cd,
       h('label', { for: id + '-prog', text: 'Receiving' }), h('span', { class: 'md-inline' }, prog, progTxt)),
     listenStatus, result, btnRetry,
-    h('details', { class: 'md-details' }, h('summary', { text: 'Received notes' }), inbox));
+    details);
 
   const box = h('fieldset', { class: 'group md-notes' }, h('legend', {}, 'Secret Notes ', h('small', { text: '(real data over the air: one Modem plays, another listens)' })),
     h('div', { class: 'row md-passrow' }, h('label', { for: id + '-pass', text: 'Shared passphrase' }), pass, showPass), passHint,
@@ -105,10 +135,11 @@ export function mountNotes(host, { ctx, dest, ready, spectro, setStatus = () => 
   function updatePassHint() {
     const secret = !!pass.value;
     passHint.textContent = secret ? 'Secret notes: encrypted with this passphrase.' : 'No passphrase: notes are open — not secret.';
-    btnSend.textContent = secret ? 'Send secret note' : 'Send open note (not secret)';
-    btnSave.textContent = secret ? 'Save secret note as sound (.wav)' : 'Save open note as sound (.wav)';
+    const what = kind === 'photo' ? 'photo' : 'note';
+    btnSend.textContent = secret ? `Send secret ${what}` : `Send open ${what} (not secret)`;
+    btnSave.textContent = secret ? `Save secret ${what} as sound (.wav)` : `Save open ${what} as sound (.wav)`;
     box.classList.toggle('md-open', !secret);
-    updateCount();
+    updateCount(); updatePicInfo();
   }
   let countSeq = 0;
   async function updateCount() {
@@ -120,7 +151,38 @@ export function mountNotes(host, { ctx, dest, ready, spectro, setStatus = () => 
     count.textContent = `${[...text].length}/${MAXLEN} characters · about ${fmtS(secs)} of airtime at ${m.name}${secret ? ' (incl. 45 bytes of encryption)' : ''}`;
   }
   msg.addEventListener('input', () => updateCount());
-  pass.addEventListener('input', () => { updatePassHint(); });
+  pass.addEventListener('input', () => { updatePassHint(); retryPhotos(); });
+  function setKind(v) { kind = v; notePart.hidden = v !== 'note'; photoPart.hidden = v !== 'photo'; updatePassHint(); }
+
+  // ------------------------------------------------------------ photo: load, shrink, encode, preview
+  async function loadPicture(file) {
+    try {
+      let bmp;
+      if (typeof createImageBitmap === 'function') bmp = await createImageBitmap(file);
+      else bmp = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = URL.createObjectURL(file); });
+      srcPic = { bmp, w: bmp.width, h: bmp.height, name: file.name };
+      reencode();
+    } catch (e) { picInfo.textContent = `Couldn’t open ${file.name} as a picture.`; }
+  }
+  function reencode() {
+    if (!srcPic) return;
+    const { w, h } = fitSize(srcPic.w, srcPic.h, SIZES[selSize.value]);
+    // shrink in halving steps so a big photo doesn't alias
+    let src = srcPic.bmp, sw = srcPic.w, sh = srcPic.h;
+    while (sw / 2 >= w * 2 && sh / 2 >= h * 2) { const c = document.createElement('canvas'); c.width = Math.round(sw / 2); c.height = Math.round(sh / 2); const g = c.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(src, 0, 0, c.width, c.height); src = c; sw = c.width; sh = c.height; }
+    const c = document.createElement('canvas'); c.width = w; c.height = h; const g = c.getContext('2d', { willReadFrequently: true }); g.imageSmoothingQuality = 'high'; g.drawImage(src, 0, 0, w, h);
+    const img = encodeImage(g.getImageData(0, 0, w, h).data, w, h, { quality: QUALITY[selDetail.value] });
+    const preview = new Uint8ClampedArray(w * h * 4); img.bands.forEach((b, i) => decodeBand(b, i, img, preview));
+    pic = { img, preview, w, h, bytes: img.bands.reduce((a, b) => a + b.length, 0), name: srcPic.name };
+    drawPixels(prevCv, preview, w, h); prevCv.style.width = Math.min(w * 3, 384) + 'px';
+    prevCv.setAttribute('aria-label', `Photo preview: ${pic.name}, ${w} by ${h} pixels, as it will arrive`);
+    updatePicInfo();
+  }
+  function updatePicInfo() {
+    if (!pic) return;
+    const m = pickMode(), secret = !!pass.value, secs = photoSeconds(photoBytes(pic.img, secret), m.key, intro.checked);
+    picInfo.textContent = `${pic.w}×${pic.h} px · ${pic.img.bands.length} stripes · ${pic.bytes} bytes · about ${fmtS(secs)} of airtime at ${m.name}${secret ? ' (encrypted)' : ''}`;
+  }
   updatePassHint();
 
   async function build(fs) {
@@ -132,20 +194,31 @@ export function mountNotes(host, { ctx, dest, ready, spectro, setStatus = () => 
       return { m, secret, payload, flags, wave: synthesize(payload, flags, m.key, { fs, amp: 0.5, intro: intro.checked }), w8: synthesize(payload, flags, m.key, { fs: 8000, amp: 0.5, intro: intro.checked }) };
     } catch (e) { sendStatus.textContent = 'Could not prepare the note: ' + e.message; return null; }
   }
+  async function buildPhoto(fs) {
+    if (!pic) { sendStatus.textContent = 'Choose a picture first.'; btnPick.focus(); return null; }
+    const m = pickMode(), secret = !!pass.value;
+    sendStatus.textContent = secret ? 'Encrypting…' : 'Preparing…';
+    try {
+      const pk = await packPhoto(pic.img, pass.value, m.id);
+      const a = synthesizePhoto(pk.frames, m.key, { fs, amp: 0.5, intro: intro.checked });
+      const a8 = synthesizePhoto(pk.frames, m.key, { fs: 8000, amp: 0.5, intro: intro.checked });
+      return { m, secret, photo: true, wave: a.audio, w8: a8.audio, marks: a.marks };
+    } catch (e) { sendStatus.textContent = 'Could not prepare the photo: ' + e.message; return null; }
+  }
   // ------------------------------------------------------------ send / save
   async function send() {
     if (ctx.state !== 'running') ctx.resume().catch(() => {});
     stopPlaying(true);
-    const n = await build(ctx.sampleRate); if (!n || dead) return;
+    const n = kind === 'photo' ? await buildPhoto(ctx.sampleRate) : await build(ctx.sampleRate); if (!n || dead) return;
     const buf = ctx.createBuffer(1, n.wave.length, ctx.sampleRate); buf.copyToChannel(n.wave, 0);
     const src = ctx.createBufferSource(), g = ctx.createGain(); g.gain.value = +vol.value; src.buffer = buf; src.connect(g); g.connect(dest);
     const t0 = ctx.currentTime + 0.05; src.start(t0);
     const dur = n.wave.length / ctx.sampleRate;
-    playing = { src, g, t0, w8: n.w8, fed: 0 };
+    playing = { src, g, t0, w8: n.w8, fed: 0, marks: n.marks || null, rows: 0 };
     src.onended = () => { if (playing && playing.src === src) stopPlaying(); };
     vol.oninput = () => { if (playing) playing.g.gain.value = +vol.value; };
     btnStop.disabled = false;
-    sendStatus.textContent = `Sending ${n.secret ? 'secret' : 'open'} note at ${n.m.name}: ${fmtS(dur)}…`;
+    sendStatus.textContent = `Sending ${n.secret ? 'secret' : 'open'} ${n.photo ? 'photo' : 'note'} at ${n.m.name}: ${fmtS(dur)}…${listening ? ' (listening is paused meanwhile)' : ''}`;
     setStatus('Secret Notes: sending');
     if (!listening) spectro.use('notes', 'note being sent');
     feedLoop();
@@ -154,33 +227,111 @@ export function mountNotes(host, { ctx, dest, ready, spectro, setStatus = () => 
     if (!playing || dead) return;
     const want = Math.min(playing.w8.length, Math.floor((ctx.currentTime - playing.t0) * 8000));
     if (want > playing.fed) { if (!listening) spectro.feed(playing.w8.subarray(playing.fed, want)); playing.fed = want; }
+    if (playing.marks && pic) {                    // paint our own preview in time with the sound, scan line on the current row
+      const t = ctx.currentTime - playing.t0; let r = 0;
+      for (const mk of playing.marks) if (mk.index >= 0) { if (t >= mk.end) r = (mk.index + 1) * 16; else if (t > mk.start) r = mk.index * 16 + Math.floor(16 * (t - mk.start) / (mk.end - mk.start)); }
+      r = Math.min(pic.h, r); playing.rows = r; drawPixels(prevCv, pic.preview, pic.w, pic.h, r, r < pic.h ? r : null);
+    }
     later(feedLoop, 40);
   }
   function stopPlaying(silent) {
     if (!playing) return;
     const p = playing; playing = null; try { p.src.onended = null; p.src.stop(); } catch (e) {} p.g.disconnect();
+    muteUntil = performance.now() + 700;            // let the room's echo die down before listening to the mic again
+    if (p.marks && pic) drawPixels(prevCv, pic.preview, pic.w, pic.h);
     btnStop.disabled = true; if (!silent) { sendStatus.textContent = 'Sent.'; setStatus('Secret Notes: sent'); }
     if (!listening) spectro.use('line');
   }
   async function save() {
-    const n = await build(48000); if (!n) return;
+    const n = kind === 'photo' ? await buildPhoto(48000) : await build(48000); if (!n) return;
+    const what = n.photo ? 'photo' : 'note';
     const url = URL.createObjectURL(pcm16Wav(n.wave, 48000));
-    const a = h('a', { href: url, download: n.secret ? 'secret-note.wav' : 'open-note.wav' }); document.body.append(a); a.click(); a.remove();
+    const a = h('a', { href: url, download: `${n.secret ? 'secret' : 'open'}-${what}.wav` }); document.body.append(a); a.click(); a.remove();
     later(() => URL.revokeObjectURL(url), 30000);
-    sendStatus.textContent = `Saved ${n.secret ? 'secret' : 'open'} note as a ${fmtS(n.wave.length / 48000)} sound file. Text or email it; the receiver uses “Decode a sound file…”.`;
+    sendStatus.textContent = `Saved ${n.secret ? 'secret' : 'open'} ${what} as a ${fmtS(n.wave.length / 48000)} sound file. Text or email it; the receiver uses “Decode a sound file…”.`;
   }
 
   // ------------------------------------------------------------ receiving
   const setCD = (on, mode) => { cd.classList.toggle('on', on); cd.lastChild.textContent = on ? `carrier (${MODES[mode].name})` : 'no carrier'; };
   let carriers = new Set();
-  function onDecoderEvent(e, source) {
+  // ---- photos: one PhotoReceiver per listening session / decoded file; each photo is a live canvas in the list
+  const receivers = new Set(), photoUi = new Map(); let rxCount = 0;
+  function makeReceiver(source) {
+    const rx = new PhotoReceiver({ passphrase: () => pass.value, onUpdate: (p) => photoUpdate(rx, p) });
+    rx.uid = ++rxCount; rx.source = source; rx.ver = 0; rx.frac = 0; rx.active = null; rx.q = Promise.resolve(); receivers.add(rx); return rx;
+  }
+  function retryPhotos() { for (const rx of receivers) rx.q = rx.q.then(() => rx.retry()).catch(() => {}); }   // feeds and retries run one at a time per receiver
+  function photoStatus(p) {
+    const dmg = p.lost && p.lost.size ? ` · ${p.lost.size} damaged stripe${p.lost.size > 1 ? 's' : ''} (smeared)` : '';
+    switch (p.status) {
+      case 'locked': return '🔒 Secret photo: enter the passphrase';
+      case 'badpass': return 'Couldn’t read it — wrong passphrase';
+      case 'waiting': return 'Stripes arriving before the photo’s header…';
+      case 'done': return `✓ ${p.encrypted ? 'Secret photo (passphrase matched)' : 'Open photo'} · ${p.w}×${p.h}${dmg}`;
+      default: return `Receiving ${p.encrypted ? 'secret ' : ''}photo: stripe ${Math.min(p.bands, p.next + 1)} of ${p.bands}${dmg}`;
+    }
+  }
+  function photoUpdate(rx, p) {
+    const key = rx.uid + ':' + p.id; let u = photoUi.get(key);
+    if (!u) {
+      const cv = h('canvas', { class: 'md-photo', width: '8', height: '8', role: 'img', 'aria-label': 'Received photo' });
+      const st = h('div', { class: 'md-photost' });
+      const btn = h('button', { type: 'button', class: 'btn small', disabled: true, onclick: () => savePicture(p) }, 'Save picture');
+      const li = h('li', { class: 'md-photoitem' }, h('b', { text: '📷 Photo ' }), h('small', { text: `(${rx.source}, ${new Date().toLocaleTimeString()})` }), cv, st, btn);
+      u = { li, cv, st, btn, rx, last: '' }; photoUi.set(key, u); inbox.prepend(li); details.open = true; inbox.scrollTop = 0;
+      while (inbox.childNodes.length > 20) { const gone = inbox.lastChild; gone.remove(); for (const [k, v] of photoUi) if (v.li === gone) photoUi.delete(k); }
+    }
+    u.p = p; if (p.status === 'receiving' && !p.done) rx.active = u;
+    drawPhoto(u);
+    const text = photoStatus(p); u.st.textContent = text; u.btn.disabled = !p.rgba || (p.encrypted && !p.key && p.status !== 'done');
+    u.cv.setAttribute('aria-label', `Received photo${p.w ? `, ${p.w} by ${p.h} pixels` : ''}: ${text}`);
+    const phase = p.status === 'receiving' ? 'receiving' : p.status;
+    if (phase !== u.last) {                         // announce changes of state, not every stripe
+      u.last = phase;
+      const kindRes = { done: p.lost && p.lost.size ? 'bad' : (p.encrypted ? 'secret' : 'open'), locked: 'locked', badpass: 'bad', receiving: 'open', waiting: 'open' }[phase] || 'open';
+      result.className = 'md-result md-' + kindRes;
+      result.replaceChildren(h('b', { text: phase === 'receiving' ? `📷 Photo arriving: ${p.w}×${p.h}, ${p.bands} stripes` : text }),
+        h('div', { class: 'md-body', text: phase === 'locked' ? 'Enter the shared passphrase above; the photo unlocks by itself.' : phase === 'badpass' ? 'The stripes arrived intact but did not decrypt: the passphrase differs.' : 'See “Received notes” for the picture.' }),
+        h('small', { text: `${(MODES[p.mode] || MODES.sturdy).name} · ${rx.source}` }));
+      setStatus('Secret Notes: ' + text);
+    }
+    listenStatus.textContent = text;
+  }
+  function drawPhoto(u) {
+    const p = u.p; if (!p || !p.rgba) { return; }
+    const live = p.status === 'receiving' && !p.done && u.rx.active === u;
+    const scan = live ? Math.min(p.h - 1, p.next * 16 + (u.rx.ver === 2 ? Math.floor(16 * u.rx.frac) : 0)) : null;
+    drawPixels(u.cv, p.rgba, p.w, p.h, p.h, scan);
+    u.cv.style.width = Math.min(p.w * 3, 384) + 'px';
+  }
+  function savePicture(p) {
+    if (!p.rgba) return;
+    const c = document.createElement('canvas'); c.width = p.w; c.height = p.h; c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(p.rgba), p.w, p.h), 0, 0);
+    const big = document.createElement('canvas'); big.width = p.w * 6; big.height = p.h * 6; const g = big.getContext('2d'); g.imageSmoothingEnabled = false; g.drawImage(c, 0, 0, big.width, big.height);
+    big.toBlob((blob) => { if (!blob) return; const url = URL.createObjectURL(blob); const a = h('a', { href: url, download: `photo-${p.id}.png` }); document.body.append(a); a.click(); a.remove(); later(() => URL.revokeObjectURL(url), 30000); }, 'image/png');
+  }
+  function onDecoderEvent(e, source, rx) {
     switch (e.kind) {
       case 'carrier': if (e.on) carriers.add(e.mode); else carriers.delete(e.mode); setCD(carriers.size > 0, [...carriers][0] || e.mode);
         if (!e.on && e.reason !== 'done' && e.reason !== 'header') { prog.value = 0; progTxt.textContent = ''; } break;
       case 'sync': listenStatus.textContent = `Hearing a ${MODES[e.mode].name} note…`; break;
-      case 'header': listenStatus.textContent = `Receiving a ${MODES[e.mode].name} note: ${e.len} bytes, about ${fmtS(e.seconds)}${e.flags & 1 ? ' (encrypted)' : ''}.`; prog.value = 0; progTxt.textContent = '0 %'; break;
-      case 'progress': prog.value = e.frac; progTxt.textContent = Math.round(e.frac * 100) + ' %'; break;
-      case 'frame': if (e.why === 'header') return; prog.value = e.ok ? 1 : 0; progTxt.textContent = e.ok ? '100 %' : ''; finish(e, source); break;
+      case 'header':
+        if (rx) { rx.ver = e.version; rx.frac = 0; }
+        if (e.version !== 2) listenStatus.textContent = `Receiving a ${MODES[e.mode].name} note: ${e.len} bytes, about ${fmtS(e.seconds)}${e.flags & 1 ? ' (encrypted)' : ''}.`;
+        prog.value = 0; progTxt.textContent = '0 %'; break;
+      case 'progress': prog.value = e.frac; progTxt.textContent = Math.round(e.frac * 100) + ' %';
+        if (rx && rx.ver === 2) { rx.frac = e.frac; if (rx.active) drawPhoto(rx.active); } break;
+      case 'frame':
+        if (e.why === 'header') return;
+        prog.value = e.ok ? 1 : 0; progTxt.textContent = e.ok ? '100 %' : '';
+        if (e.version === 2) {                       // photo frames never go to the text-note path
+          if (rx) { rx.ver = 0; rx.frac = 0; }
+          if (e.ok && rx) { const b = e.bytes, f = e.flags, md = e.mode; rx.q = rx.q.then(() => rx.feed(b, f, md)).catch(() => {}); }
+          else if (!e.ok) listenStatus.textContent = 'A photo stripe arrived damaged; it will be shown smeared.';
+          return;
+        }
+        if (rx) rx.ver = 0;
+        finish(e, source); break;
     }
   }
   async function finish(e, source) {
@@ -217,16 +368,19 @@ export function mountNotes(host, { ctx, dest, ready, spectro, setStatus = () => 
     const srcNode = ctx.createMediaStreamSource(stream);
     const cap = new AudioWorkletNode(ctx, 'retrosynths-modem-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
     const mute = ctx.createGain(); mute.gain.value = 0; srcNode.connect(cap); cap.connect(mute); mute.connect(dest);
-    const dec = new NoteDecoder({ sampleRate: ctx.sampleRate, onEvent: (e) => onDecoderEvent(e, 'microphone') });
+    const rx = makeReceiver('microphone');
+    const dec = new NoteDecoder({ sampleRate: ctx.sampleRate, onEvent: (e) => onDecoderEvent(e, 'microphone', rx) });
     const down = new Down8k(ctx.sampleRate); let lv = 0;
     cap.port.onmessage = (ev) => {
-      const x = ev.data; dec.push(x);
+      const x = ev.data;
+      // don't decode ourselves: while this device is sending (and briefly after), feed silence instead
+      dec.push(playing || performance.now() < muteUntil ? new Float32Array(x.length) : x);
       let p = 0; for (let i = 0; i < x.length; i++) p += x[i] * x[i];
       const db = 10 * Math.log10(p / x.length + 1e-12); lv = Math.max(db, lv - 1.5);
       level.value = Math.max(0, Math.min(1, (lv + 70) / 70)); levelTxt.textContent = lv > -90 ? `${Math.round(lv)} dBFS` : '—';
       spectro.feed(down.run(x));
     };
-    listening = { stream, srcNode, cap, mute, dec };
+    listening = { stream, srcNode, cap, mute, dec, rx };
     btnListen.textContent = 'Stop listening'; btnListen.setAttribute('aria-pressed', 'true');
     listenStatus.textContent = 'Listening… play a note near the microphone.'; setStatus('Secret Notes: listening');
     spectro.use('notes', 'microphone');
@@ -250,10 +404,12 @@ export function mountNotes(host, { ctx, dest, ready, spectro, setStatus = () => 
       const n = audio.length, x = new Float32Array(n);
       for (let c = 0; c < audio.numberOfChannels; c++) { const d = audio.getChannelData(c); for (let i = 0; i < n; i++) x[i] += d[i] / audio.numberOfChannels; }
       let found = 0;
-      const dec = new NoteDecoder({ sampleRate: audio.sampleRate, onEvent: (e) => { if (e.kind === 'frame' && e.why !== 'header') found++; onDecoderEvent(e, 'file “' + file.name + '”'); } });
+      const src = 'file “' + file.name + '”', rx = makeReceiver(src);
+      const dec = new NoteDecoder({ sampleRate: audio.sampleRate, onEvent: (e) => { if (e.kind === 'frame' && e.why !== 'header') found++; onDecoderEvent(e, src, rx); } });
       const CH = Math.round(audio.sampleRate * 0.5);
       for (let i = 0; i < n && !dead; i += CH) { dec.push(x.subarray(i, Math.min(n, i + CH))); await new Promise(r => later(r, 0)); }
       dec.flush(0.6);
+      await rx.q;                                      // let the last photo stripes decrypt
       if (!found) { listenStatus.textContent = `No note found in ${file.name}.`; result.className = 'md-result md-bad'; result.replaceChildren(h('b', { text: 'No note found' }), h('div', { class: 'md-body', text: 'That sound file does not seem to contain a note.' })); }
       else listenStatus.textContent = `Finished decoding ${file.name}.`;
     } catch (e) { listenStatus.textContent = `Couldn’t open ${file.name} as audio.`; }
@@ -263,6 +419,7 @@ export function mountNotes(host, { ctx, dest, ready, spectro, setStatus = () => 
   updateCount();
   return {
     unmount() { dead = true; for (const t of timers) clearTimeout(t); timers.clear(); stopPlaying(true); stopListening(); box.remove(); },
-    _test: { send, save, startListening, stopListening, decodeFile, setPass: (v) => { pass.value = v; updatePassHint(); }, setMsg: (v) => { msg.value = v; updateCount(); } },
+    _test: { send, save, startListening, stopListening, decodeFile, setPass: (v) => { pass.value = v; updatePassHint(); retryPhotos(); }, setMsg: (v) => { msg.value = v; updateCount(); },
+      photos: () => [...photoUi.values()].reverse().map(u => u.p).filter(Boolean), /* newest first */ preview: () => pic, sending: () => playing && { rows: playing.rows }, setKind: (v) => { const r = host.querySelector(`input[name="${id}-kind"][value="${v}"]`); r.checked = true; setKind(v); } },
   };
 }

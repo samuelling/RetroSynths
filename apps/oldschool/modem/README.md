@@ -26,7 +26,8 @@ m.unmount();
 | `bbs.js` | the scripted BBS / ISP / caller. Its text is really modulated onto the line by the far modem. |
 | `notes-core.js` | Secret Notes modem: framing, FEC, synthesis, streaming decoder (pure JS, runs in Node) |
 | `notes-crypto.js` | Secret Notes payload: deflate + PBKDF2 → AES-256-GCM (WebCrypto) |
-| `notes-ui.js` | the Secret Notes panel (send, save as .wav, listen through the mic, decode a sound file) |
+| `notes-photo.js` | Secret Notes photos: stripe codec, photo frame trains, `PhotoReceiver` (shared with Screech; spec in Screech's `PHOTO.md`) |
+| `notes-ui.js` | the Secret Notes panel (notes and photos: send, save as .wav, listen through the mic, decode a sound file) |
 
 ## How it works
 
@@ -238,6 +239,31 @@ The 2–6 % failures at high SNR are draws with very strong early reflections. F
 * `node tests/modem-notes-browser.mjs` drives Chrome's fake microphone with a room-simulated recording. It
   covers the right, wrong and missing passphrase; keep-listening; Save as sound → Decode a sound file (WAV,
   m4a, ogg, mp3); and axe (0 violations).
+
+### Photos
+
+Photos travel as a train of ordinary note frames with frame-header **version 2**: a header, one frame per
+16-pixel stripe (a small JPEG-like DCT codec), then the header again. Encrypted photos use AES-256-GCM per
+stripe. The receiver routes every version-2 frame that passes its CRC to a `PhotoReceiver`, never to the
+text-note path; this applies to the microphone and to "Decode a sound file", with one receiver per listening
+session or file.
+
+* **Send:** choose **Photo**, then a picture, a size (Tiny 64 / Small 96 / Large 128 px) and a detail level
+  (Low / Medium / High).
+  * The preview is drawn by decoding the stripes that will be sent, so it is pixel-identical to what
+    arrives. It shows w×h, the stripe count and the airtime.
+  * While the photo plays, the preview paints in from the top in time with the sound, with a bright scan
+    line. "Save as sound" works for photos too.
+* **Receive:** each photo is a live, pixelated canvas in the received list.
+  * A scan line marks the stripe that is arriving, using the decoder's progress within the current frame.
+  * The status reads "stripe k of n", ✓ done, 🔒 locked (no passphrase) or wrong passphrase, with a count of
+    damaged stripes; those are drawn smeared.
+  * Changing the passphrase calls `retry()`, so a locked photo unlocks by itself. "Save picture" writes a
+    PNG scaled up ×6, nearest-neighbour.
+* **Self-decoding is muted:** while this device is sending a note or photo, and for 0.7 s afterwards, the
+  listener is fed silence so it doesn't decode its own sound.
+* **Airtime** (measured on four test photos): Tiny takes 20–70 s at Quick (about twice that at Sturdy). Large/High
+  takes up to about 3 min at Quick and 6 min at Sturdy. Busy pictures cost more than smooth ones.
 
 ### Caveats
 

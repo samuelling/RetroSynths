@@ -99,8 +99,19 @@
 .modem .md-result.md-bad b, .modem .md-result.md-locked b { color: #ffd27a; }
 .modem .md-result.md-open b { color: #e8f8a0; }
 .modem .md-result small { display: block; color: #2fa846; margin-top: 3px; }
-.modem .md-inbox { max-height: 180px; overflow: auto; margin: 4px 0 0; padding: 3px 6px 3px 2.6em; background: #fff; font-size: 12px;
+.modem .md-inbox { max-height: 320px; overflow: auto; margin: 4px 0 0; padding: 3px 6px 3px 2.6em; background: #fff; font-size: 12px;
   box-shadow: inset 1px 1px var(--lo), inset -1px -1px var(--hi); }
 .modem .md-inbox li { margin: 2px 0; white-space: pre-wrap; word-break: break-word; }
 .modem .md-inbox small { color: #505050; }
 @media (max-width: 760px) { .modem .md-notesgrid { grid-template-columns: 1fr; } }
+
+/* ---------- Secret Notes: photos ---------- */
+.modem .md-kind { border: 1px solid var(--lo); margin: 0 0 6px; padding: 2px 8px 4px; display: flex; gap: 14px; }
+.modem .md-kind legend { padding: 0 4px; }
+.modem .md-photopart .row label { margin-left: 4px; }
+.modem .md-photo { display: block; image-rendering: pixelated; image-rendering: crisp-edges; max-width: 100%; height: auto; margin: 4px 0;
+  background: #181c18; box-shadow: inset 1px 1px var(--lo), 1px 1px var(--hi); }
+.modem .md-preview { min-width: 96px; min-height: 64px; }
+.modem .md-photoitem { list-style-position: outside; padding: 3px 0; border-bottom: 1px dotted var(--lo); }
+.modem .md-photoitem .md-photo { margin: 3px 0; }
+.modem .md-photost { font: 11px "Lucida Console", monospace; margin-bottom: 3px; }

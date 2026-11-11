@@ -77,3 +77,12 @@ export function addNoise(x, sigPower, snrDb, fs, rng) {
   const g = Math.sqrt(sigPower / Math.pow(10, snrDb / 10) / p); const y = new Float32Array(x.length);
   for (let i = 0; i < x.length; i++) y[i] = x[i] + nb[i] * g; return y;
 }
+
+/** any audio through the speaker + room (no clap), with leading/trailing silence; returns { y, sigPower } */
+export function roomAudio(x, fs, rng, { rt60 = 0.4, drr = 8, gainDb = -8, lead = 1.0, trail = 1.5 } = {}) {
+  let y = filt(x, [['hp', 300, 0.7], ['hp', 300, 0.7], ['lp', 7000, 0.7]], fs);
+  y = convolve(y, roomIR(fs, rt60, drr, rng));
+  const g = Math.pow(10, gainDb / 20), L = Math.round(lead * fs), out = new Float32Array(L + y.length + Math.round(trail * fs));
+  let p = 0; for (let i = 0; i < y.length; i++) { out[L + i] = y[i] * g; if (i < x.length) p += (y[i] * g) ** 2; }
+  return { y: out, sigPower: p / x.length };
+}
