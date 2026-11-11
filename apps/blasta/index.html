@@ -14,15 +14,15 @@
 
 <div id="desktop">
   <div class="window" id="win">
-    <div class="titlebar"><span class="sysbox" title="Blasta">&#9644;</span><span class="title">Blasta — General MIDI Time Machine</span><span class="tbtn">&#9660;</span><span class="tbtn">&#9650;</span></div>
-    <div class="menubar">
-      <label class="menu" for="fileMidi"><u>F</u>ile…</label>
-      <span class="menu" id="menuDemo"><u>D</u>emo</span>
-      <span class="menu" id="menuPanic"><u>P</u>anic</span>
-      <span class="menu" id="menuAbout"><u>H</u>elp</span>
+    <header class="titlebar"><h1 class="title">Blasta — General MIDI Time Machine</h1></header>
+    <nav class="menubar" aria-label="Menu">
+      <button type="button" class="menu" data-file="fileMidi" title="Open a MIDI file (.mid)"><u>O</u>pen…</button>
+      <button type="button" class="menu" id="menuDemo" title="Play the demo song"><u>D</u>emo</button>
+      <button type="button" class="menu" id="menuPanic" title="Silence every note (if something gets stuck)"><u>P</u>anic</button>
+      <button type="button" class="menu" id="menuHelp" title="How to use this app (F1)"><u>H</u>elp</button>
       <input type="file" id="fileMidi" accept=".mid,.midi,.rmi,.kar" hidden>
-    </div>
-    <div class="body">
+    </nav>
+    <main class="body">
       <!-- ERA: the four sound cards; the slider crossfades between neighbours -->
       <fieldset class="group machine era">
         <legend>Sound card</legend>
@@ -56,21 +56,21 @@
       </fieldset>
 
       <fieldset class="group transport">
-        <legend>Media Player</legend>
+        <legend>Player</legend>
         <div class="row">
-          <button class="btn" id="btnPlay" title="Play / Pause">&#9654;</button>
-          <button class="btn" id="btnStop" title="Stop">&#9632;</button>
-          <label class="btn" for="fileMidi" title="Open MIDI file">Open…</label>
-          <button class="btn" id="btnDemo">Demo</button>
+          <button class="btn" id="btnPlay" type="button" title="Play / Pause (Space)" aria-label="Play">&#9654;</button>
+          <button class="btn" id="btnStop" type="button" title="Stop" aria-label="Stop">&#9632;</button>
+          <button type="button" class="btn" data-file="fileMidi" title="Open a MIDI file">Open…</button>
+          <button class="btn" id="btnDemo" type="button">Demo</button>
           <label class="chk"><input type="checkbox" id="chkLoop"> Loop</label>
         </div>
-        <div class="row"><input type="range" id="seek" min="0" max="1000" value="0"></div>
-        <div class="row lcd"><span id="songTitle">No song loaded</span><span id="songTime">00:00 / 00:00</span></div>
+        <div class="row"><input type="range" id="seek" min="0" max="1000" value="0" aria-label="Song position"></div>
+        <div class="row lcd"><span id="songTitle" aria-live="polite">No song loaded</span><span id="songTime">00:00 / 00:00</span></div>
       </fieldset>
 
       <fieldset class="group scopebox">
         <legend>Output</legend>
-        <canvas id="scope" width="512" height="96"></canvas>
+        <canvas id="scope" width="512" height="96" role="img" aria-label="Oscilloscope of the sound output"></canvas>
         <div class="row"><label>Volume <input type="range" id="vol" min="0" max="1.5" step="0.01" value="0.8"></label></div>
       </fieldset>
 
@@ -89,7 +89,7 @@
         <legend>Instruments</legend>
         <div class="inst-wrap">
           <div class="inst-side">
-            <select id="instList" size="18"></select>
+            <select id="instList" size="18" aria-label="Instruments"></select>
             <div class="row">
               <button class="btn small" id="instCopy" type="button" title="Make an editable copy">Copy</button>
               <button class="btn small" id="instRename" type="button">Rename</button>
@@ -99,7 +99,7 @@
             <div class="row">
               <button class="btn small" id="kitBtn" type="button">Drum kit…</button>
               <button class="btn small" id="instExport" type="button" title="Save this card's instruments to a file">Export</button>
-              <label class="btn small" for="instImport">Import</label>
+              <button type="button" class="btn small" data-file="instImport" title="Load instruments saved with Export">Import</button>
               <input type="file" id="instImport" accept=".json" hidden>
             </div>
           </div>
@@ -111,15 +111,6 @@
         </div>
       </fieldset>
 
-      <fieldset class="group keys">
-        <legend>Keyboard <small>(plays the selected instrument · QWERTY: A W S E D F T G Y H U J K · Z/X octave)</small></legend>
-        <div class="row">
-          <span>Playing: <b id="kbInst"></b></span>
-          <label>MIDI in <select id="midiIn"><option value="">(click to enable)</option></select></label>
-          <span id="octLabel">Oct 4</span>
-        </div>
-        <div id="piano"></div>
-      </fieldset>
 
       <!-- BANKS -->
       <fieldset class="group banks">
@@ -127,14 +118,14 @@
         <div class="bankrow">
           <span class="bk">FM (AdLib / SB16)</span>
           <span class="bstat" id="stFM">Blasta Original FM</span>
-          <label class="btn small" for="fileOP2">Load .OP2…</label>
+          <button type="button" class="btn small" data-file="fileOP2">Load .OP2…</button>
           <button class="btn small" id="btnFMReset" type="button" title="Forget your choice and go back to the site default">Default</button>
           <input type="file" id="fileOP2" accept=".op2" hidden>
         </div>
         <div class="bankrow">
           <span class="bk">AWE32 ROM</span>
           <span class="bstat" id="st2">GeneralUser GS → AWE-style ROM</span>
-          <label class="btn small" for="fileSF2a">Load .SF2…</label>
+          <button type="button" class="btn small" data-file="fileSF2a" aria-label="Load .SF2… into the AWE32 slot">Load .SF2…</button>
           <button class="btn small" id="reset2" type="button" title="Forget your choice and go back to the site default">Default</button>
           <label class="chk" title="Squeeze the bank into AWE32-ROM shape: 22kHz mono, one velocity layer, sparse multisamples, short loops"><input type="checkbox" id="budget2" checked> ROM budget</label>
           <input type="file" id="fileSF2a" accept=".sf2" hidden>
@@ -142,7 +133,7 @@
         <div class="bankrow">
           <span class="bk">Live! bank</span>
           <span class="bstat" id="st3">GeneralUser GS → Live!-style bank</span>
-          <label class="btn small" for="fileSF2b">Load .SF2…</label>
+          <button type="button" class="btn small" data-file="fileSF2b" aria-label="Load .SF2… into the Live! slot">Load .SF2…</button>
           <button class="btn small" id="reset3" type="button" title="Forget your choice and go back to the site default">Default</button>
           <label class="chk" title="Squeeze the bank into early-Live! shape: 32kHz, shorter attacks and loops"><input type="checkbox" id="budget3" checked> ROM budget</label>
           <input type="file" id="fileSF2b" accept=".sf2" hidden>
@@ -154,14 +145,14 @@
       <fieldset class="group locker">
         <legend>Bank Locker <small>(your own banks, password-protected, on every device)</small></legend>
         <form class="row" id="lkLogin" autocomplete="on">
-          <input id="lkUrl" name="url" type="url" placeholder="https://blasta-locker.YOU.workers.dev" size="36" required>
-          <input id="lkPw" name="password" type="password" placeholder="password" autocomplete="current-password" size="16" required>
+          <input id="lkUrl" name="url" type="url" aria-label="Locker address" placeholder="https://blasta-locker.YOU.workers.dev" size="36" required>
+          <input id="lkPw" name="password" type="password" aria-label="Locker password" placeholder="password" autocomplete="current-password" size="16" required>
           <label class="chk"><input type="checkbox" id="lkRemember" checked> Remember on this device</label>
           <button class="btn small" type="submit">Unlock</button>
         </form>
         <div id="lkOpen" hidden>
           <div class="row">
-            <label class="btn small" for="lkFile">Upload…</label>
+            <button type="button" class="btn small" data-file="lkFile">Upload…</button>
             <input type="file" id="lkFile" accept=".sf2,.op2" multiple hidden>
             <button class="btn small" id="lkRefresh" type="button">Refresh</button>
             <button class="btn small" id="lkLock" type="button">Lock</button>
@@ -174,17 +165,29 @@
           <div class="shelfhead">Public banks <small>(read-only — load one into your own slots)</small></div>
           <div id="shelfList"></div>
         </div>
-        <div class="lkstat" id="lkStat">Locked.</div>
+        <div class="lkstat" id="lkStat" role="status" aria-live="polite">Locked.</div>
       </fieldset>
+    </main>
+    <div class="dock" id="dock">
+      <section class="keys" aria-label="Keyboard">
+        <div class="keyrow">
+          <label class="kb-inst">Keyboard plays <select id="kbInst" aria-label="Instrument the keyboard plays"></select></label>
+          <span class="octave"><button type="button" class="btn small" id="octDown" aria-label="Octave down (Z)" title="Octave down (Z)">&#9664;</button><span id="octLabel" aria-live="polite">Oct 4</span><button type="button" class="btn small" id="octUp" aria-label="Octave up (X)" title="Octave up (X)">&#9654;</button></span>
+          <label class="kb-midi">MIDI in <select id="midiIn"><option value="">(click to enable)</option></select></label>
+          <span class="kbhint" id="kbHint">&#9000; Type the letters on the keys · <b>Z</b> <b>X</b> octave · <b>Space</b> play</span>
+          <button type="button" class="btn small" id="dockToggle" aria-expanded="true" aria-controls="piano">Hide keys</button>
+        </div>
+        <div id="piano" aria-hidden="true"></div>
+      </section>
+      <div class="statusbar" role="region" aria-label="Status"><span id="status" role="status" aria-live="polite">Ready</span><span id="voices"></span></div>
     </div>
-    <div class="statusbar"><span id="status">Ready</span><span id="voices"></span></div>
   </div>
 </div>
 
 <div id="about" class="dialog" hidden>
-  <div class="window">
-    <div class="titlebar"><span class="sysbox">&#9644;</span><span class="title">About Blasta</span></div>
-    <div class="body about-body">
+  <div class="window" role="dialog" aria-modal="true" aria-labelledby="aboutTitle">
+    <div class="titlebar"><button type="button" class="sysbox" data-close aria-label="Close">&#9644;</button><h2 class="title" id="aboutTitle">About Blasta</h2></div>
+    <div class="body about-body" id="aboutText">
       <p><b>Blasta</b> plays General MIDI through four simulated generations of PC sound card. Drag the slider to age a song forward from AdLib FM to Sound Blaster Live! — neighbouring cards crossfade.</p>
       <p>Each card has its <b>own</b> voices and instruments: the FM cards play an OPL patch bank you can edit operator by operator (2-op, OP2 double voices and true OPL3 4-op); the wavetable cards play the loaded SoundFont's own presets, with your generator edits layered on top. The <b>Arranger</b> shows where each MIDI part lands — leave it on Auto or pick any instrument and voice.</p>
       <p><b>FM eras</b> run a cycle-accurate YMF262 emulation (a JavaScript port of <a href="https://github.com/nukeykt/Nuked-OPL3" target="_blank" rel="noopener">Nuked OPL3</a> by Nuke.YKT, LGPL-2.1) at the chip's native 49,716 Hz, programmed through its registers like a period driver and fed through a floating-point DAC model, with an original patch bank. Load your own <code>.op2</code> bank (e.g. the free DMXOPL).</p>
@@ -192,7 +195,7 @@
       <p>Banks you load are <b>saved in this browser</b> and come back next time. <b>Default</b> forgets them. Unlock your <b>Bank Locker</b> (a private Cloudflare store, see <code>locker/README.md</code>) and they're also uploaded behind your password and follow you to every device.</p>
       <p>Drop <code>.mid</code>, <code>.sf2</code> or <code>.op2</code> files anywhere on the window.</p>
       <p class="fine">No Creative, E-mu, Yamaha or Microsoft data is included. Sound Blaster, AWE32 and Live! are trademarks of Creative Technology; names are used only to describe the eras being evoked.</p>
-      <div class="row right"><button class="btn" id="aboutOK">OK</button></div>
+      <div class="row right"><button class="btn" id="aboutOK" type="button">OK</button></div>
     </div>
   </div>
 </div>

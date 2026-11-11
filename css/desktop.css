@@ -16,9 +16,7 @@ button { font: inherit; }
 @keyframes blink { 50% { opacity: 0; } }
 #splash { position: fixed; inset: 0; z-index: 999; background: #000; display: flex; align-items: center; justify-content: center; cursor: pointer; }
 .splash-box { background: var(--face); padding: 28px 46px; text-align: center; border: 2px solid #fff; box-shadow: 4px 4px 0 #555; min-width: 320px; }
-.splash-logo { font-size: 30px; line-height: 1; letter-spacing: 2px; transform: skewX(-12deg); }
-.splash-logo .w4:nth-child(1) { color: #e2463b; } .splash-logo .w4:nth-child(2) { color: #3aa84f; }
-.splash-logo .w4:nth-child(3) { color: #2f6fd0; } .splash-logo .w4:nth-child(4) { color: #f2c63a; }
+.splash-logo { display: block; margin: 0 auto; shape-rendering: crispEdges; }
 .splash-name { font: bold 34px "Times New Roman", serif; font-style: italic; margin-top: 6px; }
 .splash-ver { font-size: 14px; margin-top: 2px; }
 .splash-fine { font-size: 11px; color: #404040; margin-top: 14px; }
@@ -47,9 +45,9 @@ button { font: inherit; }
 .sysmenu div:hover { background: var(--title); color: #fff; }
 .sysmenu hr { border: 0; border-top: 1px solid #000; margin: 2px 0; }
 
-/* ---------- Program Manager ---------- */
-.pm-body { flex: 1; position: relative; background: #fff; overflow: hidden; }
-.group { left: 10px; top: 10px; right: 10px; bottom: 64px; box-shadow: none; }
+/* ---------- Program Shelf ---------- */
+.pm-body { flex: 1; position: relative; background: #fff; overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 10px; }
+.group { position: relative; left: auto; top: auto; box-shadow: none; min-height: 0; flex: none; }
 .group > .tb { background: var(--title); color: #fff; }
 .icons { flex: 1; background: #fff; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 6px 4px; padding: 12px 8px; overflow: auto; }
 .icon { width: 92px; display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; padding: 2px; text-align: center; }
@@ -57,16 +55,12 @@ button { font: inherit; }
 .icon span { padding: 0 3px; line-height: 1.2; }
 .icon.sel span { background: var(--title); color: #fff; outline: 1px dotted #ff0; }
 .icon.off { opacity: .55; }
-.mini-groups { position: absolute; left: 10px; right: 10px; bottom: 6px; height: 52px; display: flex; gap: 14px; }
-.mini { width: 84px; display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer; font-size: 11px; }
-.mini-ico { width: 30px; height: 20px; background: var(--face); border: 1px solid #000; box-shadow: inset 1px 1px #fff, inset -1px -1px #808080; position: relative; }
-.mini-ico::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 5px; background: var(--title); }
 #minimized { position: fixed; left: 8px; bottom: 6px; display: flex; gap: 14px; }
 #minimized .icon span { color: #fff; }
 #minimized .icon.sel span { color: #fff; }
 
-/* ---------- notepad ---------- */
-.notepad { flex: 1; overflow: auto; background: #fff; padding: 6px 8px; font: 13px/1.45 "Lucida Console", "Courier New", monospace; white-space: pre-wrap; user-select: text; }
+/* ---------- text viewer ---------- */
+.textview { flex: 1; overflow: auto; background: #fff; padding: 6px 8px; font: 13px/1.45 "Lucida Console", "Courier New", monospace; white-space: pre-wrap; user-select: text; }
 
 /* ---------- dialog ---------- */
 .modal { position: fixed; inset: 0; z-index: 800; display: flex; align-items: center; justify-content: center; }
@@ -82,3 +76,24 @@ button { font: inherit; }
   #progman { left: 0 !important; top: 0 !important; width: 100% !important; height: 100% !important; }
   .icon { width: 30%; }
 }
+
+/* ---------- accessibility (Nov 2026) ---------- */
+.sr-only { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+h1, h2, h3 { margin: 0; font: inherit; }
+h2.tt, h3.tt { font-weight: bold; }
+button.sys, button.tbb { border: 0; padding: 0; font-family: inherit; }
+button.menu { background: none; border: 0; font: inherit; color: #000; }
+.menu:focus-visible, button.menu[aria-expanded=true] { background: var(--title); color: #fff; outline: none; }
+:focus { outline: none; }
+:focus-visible { outline: 1px dotted #000; outline-offset: -4px; }
+.icon:focus-visible { outline: none; }
+.icon:focus-visible span { outline: 1px dotted #ff0; outline-offset: 0; background: var(--title); color: #fff; }
+.textview:focus-visible { outline: 1px dotted #000; outline-offset: -3px; }
+.win iframe:focus-visible { outline: none; }
+.sysmenu button { display: flex; justify-content: space-between; gap: 18px; width: 100%; padding: 2px 18px; background: none; border: 0; font: inherit; color: #000; cursor: pointer; text-align: left; }
+.sysmenu button:hover, .sysmenu button:focus { background: var(--title); color: #fff; outline: none; }
+.sysmenu .acc { opacity: .8; }
+.desk-hint { position: fixed; right: 12px; bottom: 8px; margin: 0; color: #fff; font-size: 11px; text-shadow: 1px 1px 0 #004040; pointer-events: none; }
+#dos:focus { outline: none; }
+@media (max-width: 760px) { .desk-hint { display: none; } }
+@media (prefers-reduced-motion: reduce) { #cursor { animation: none; } }

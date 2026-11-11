@@ -125,13 +125,41 @@ function updateMix() {
 
 // ------------------------------------------------------------ boot text
 function typeBoot() {
-  const BOOT = ['Award Modular BIOS v4.51PG, An Energy Star Ally', 'Copyright (C) 1984-95, Award Software, Inc.', '',
+  const BOOT = ['RetroBIOS v4.51 · Plug and Pray Edition', 'PnP init ... OK', '',
     'Main Processor : PENTIUM-S 133MHz', 'Memory Testing : 16384K OK', '',
     'C:\\> SET BLASTER=A220 I5 D1 H5 P330 T6', 'C:\\> CD \\BLASTA', 'C:\\BLASTA> BLASTA.EXE /GM'];
   const el = $('bootText'); el.textContent = '';
   let i = 0;
   const step = () => { if (i < BOOT.length) { el.textContent += BOOT[i++] + '\n'; setTimeout(step, i < 3 ? 120 : 160); } };
   step();
+}
+
+// ------------------------------------------------------------ help topics (added to the shared Help window)
+export function helpTopics() {
+  return [
+    ['era', 'The era slider', `
+      <p>The slider at the top moves one song through four generations of PC sound card: AdLib (1989), Sound Blaster 16 (1992), AWE32 (1994) and Live! (1998).</p>
+      <ul>
+        <li><b>Drag</b> it, or use the arrow keys when it's focused. In between two cards you hear both, crossfaded, so you can morph a song from FM bleeps to sampled orchestra.</li>
+        <li>The four buttons under the slider <b>jump</b> straight to one card.</li>
+        <li>The Voices, Arranger and Instruments panels always show the card nearest the slider.</li>
+      </ul>`],
+    ['banks', 'Sound banks', `
+      <p>Each card's instruments come from a bank. You can load your own; they're kept in this browser for next time.</p>
+      <ul>
+        <li><b>FM (AdLib / SB16): Load .OP2…</b> loads a DOS-game FM patch bank, such as the free DMXOPL.</li>
+        <li><b>AWE32 / Live!: Load .SF2…</b> loads a SoundFont. Its own presets appear in the Instruments list by name. GM instruments it doesn't have fall back to the closest sound in the same family.</li>
+        <li><b>ROM budget</b> squeezes a modern SoundFont down to what the real card could hold (lower sample rate, mono, shorter loops). Untick it if your SoundFont is already period-sized.</li>
+        <li><b>Default</b> forgets your bank and goes back to the built-in one.</li>
+        <li>You can also drop <code>.sf2</code> or <code>.op2</code> files onto the window.</li>
+      </ul>`],
+    ['locker', 'Bank Locker', `
+      <p>Optional. If you run your own Bank Locker (a small private Cloudflare store, see <code>locker/README.md</code> in the code), enter its address and password and press <b>Unlock</b>. Banks you load are then also saved there, behind your password, and follow you to other devices.</p>
+      <ul>
+        <li><b>Upload…</b> adds banks. On each row, <b>→ FM</b>, <b>→ AWE32</b> or <b>→ Live!</b> loads it into that slot, <b>Public</b> shares it read-only, and <b>✕</b> deletes it.</li>
+        <li><b>Public banks</b> are read-only banks the site owner has shared. Anyone can load one into their own slots, but no one else can change them.</li>
+      </ul>`],
+  ];
 }
 
 // ------------------------------------------------------------ sound banks
@@ -351,7 +379,7 @@ async function refreshLocker() {
     row.querySelector('.lkpub input').onchange = (e) => togglePublic(b.name, e.target.checked, e.target);
     row.querySelector('.lkname').textContent = b.name;
     const btns = row.querySelector('.lkbtns');
-    const add = (label, fn, title) => { const x = document.createElement('button'); x.className = 'btn small'; x.type = 'button'; x.textContent = label; x.title = title || ''; x.onclick = fn; btns.appendChild(x); };
+    const add = (label, fn, title) => { const x = document.createElement('button'); x.className = 'btn small'; x.type = 'button'; x.textContent = label; x.title = title || ''; x.setAttribute('aria-label', `${title || label}: ${b.name}`); x.onclick = fn; btns.appendChild(x); };
     if (b.kind === 'op2') add('→ FM', () => assign(b, 'fm'), 'Use for the AdLib / SB16 cards');
     else { add('→ AWE32', () => assign(b, 2), 'Load into the AWE32 slot'); add('→ Live!', () => assign(b, 3), 'Load into the Live! slot'); }
     add('✕', async () => {
@@ -387,7 +415,7 @@ function renderShelf() {
     row.innerHTML = `<span class="lkname"></span><span class="lksize">${mb(b.size)}</span><span class="lkin">${isDef.length ? '★ default ' + isDef.join(', ') : ''}</span><span class="lkbtns"></span>`;
     row.querySelector('.lkname').textContent = b.name;
     const btns = row.querySelector('.lkbtns');
-    const add = (label, slot) => { const x = document.createElement('button'); x.className = 'btn small'; x.type = 'button'; x.textContent = label; x.onclick = () => takePublic(b, slot); btns.appendChild(x); };
+    const add = (label, slot) => { const x = document.createElement('button'); x.className = 'btn small'; x.type = 'button'; x.textContent = label; x.setAttribute('aria-label', `Load ${b.name} into the ${label.slice(2)} slot`); x.onclick = () => takePublic(b, slot); btns.appendChild(x); };
     if (b.kind === 'op2') add('→ FM', 'fm'); else { add('→ AWE32', 2); add('→ Live!', 3); }
     box.appendChild(row);
   }

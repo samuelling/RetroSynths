@@ -1,8 +1,8 @@
 # RetroSynths
 
-A Windows 3.1-style desktop of retro sound chips that you play with General MIDI. Each app plays MIDI files, the on-screen keys, your QWERTY keyboard or a Web MIDI keyboard through emulated period hardware.
+A make-believe early-'90s desktop of retro sound chips that you play with General MIDI. Each app plays MIDI files, the on-screen keys, your computer keyboard or a Web MIDI keyboard through emulated period hardware. The desktop also opens three megaZINE friends in windows: Big Apple Sam, Q-Slowdem (the MEGAzine BBS terminal) and Townies.
 
-**Open:** https://samuelling.github.io/RetroSynths/. Deep links: `#blasta`, `#console`, `#oldschool`.
+**Open:** https://samuelling.github.io/RetroSynths/. Deep links: `#blasta`, `#console`, `#oldschool`, `#bigapple`, `#qslowdem`, `#townies`, `#readme`.
 
 | App | Machines |
 |---|---|
@@ -24,14 +24,17 @@ Each machine runs an emulation of its own sound chip at the chip's native clock,
   - AWE32 / Live!: SoundFont zone and generator editor.
   - Edits save automatically, and Export/Import moves them as files.
 - **Arranger:** shows how a General MIDI file lands on the chip. Each channel is on *Auto* (the machine's own GM mapping, run by a period-style frame-rate driver) or set to any native instrument, and can be pinned to a specific voice.
-- **Keyboard:** the on-screen or QWERTY keyboard, or a Web MIDI keyboard, plays the selected instrument.
+- **Keyboard:** docked at the bottom of every app, always on screen. The computer-keyboard letters are printed on the keys (A–; white, W E T Y U O P black, Z/X octave). The on-screen keys or a Web MIDI keyboard work too.
+- **Help** (menu or F1): a full how-to for each app.
+- **Accessibility:** everything works by keyboard and is labeled for screen readers, with focus rings in the period dotted style and reduced motion when the system asks for it.
 
 ## Layout
 
 ```
-index.html, shell/, css/      the Windows 3.1 desktop (Program Manager + app windows)
+index.html, shell/, css/      the desktop (Program Shelf + app windows)
 apps/blasta/                  Blasta
 apps/console/, apps/oldschool/  thin pages over common/machine-app.js
+common/help.js                Help window + accessible dialogs
 common/host-core.js           AudioWorklet host: MIDI state, scheduling, machine switching
 common/machines/              one module per machine (interface: common/machines/README.md)
 soundfonts/                   GeneralUser GS (Blasta's wavetable eras, SNES sample RAM)

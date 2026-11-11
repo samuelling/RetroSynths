@@ -191,7 +191,7 @@ body.dragging .window#win { outline: 3px dashed var(--title); }
 /* ---------- embedded in the RetroSynths desktop ---------- */
 body.embed #desktop { padding: 0; display: block; }
 body.embed #win { max-width: none; border: none; box-shadow: none; }
-body.embed #win > .titlebar { display: none; }
+body.embed #win > .titlebar { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 body.embed #boot { background: var(--face); color: #000; display: flex; flex-direction: column; align-items: center; justify-content: center; font: 14px var(--ui); }
 body.embed #bootText { display: none; }
 body.embed #bootHint { animation: none; padding: 12px 22px; border: 1px solid #000; box-shadow: inset 1px 1px #fff, inset -1px -1px #808080; background: var(--face); }
@@ -260,3 +260,78 @@ body.embed #boot.gone { display: none; }
 body[data-group] .body { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .voices { grid-column: 1 / -1; }
 #voiceRows { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 1px 18px; }
+
+/* ---------- accessibility + keyboard dock (Nov 2026) ---------- */
+.sr-only { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+/* the classic dotted focus rectangle, drawn inside the control so the bevels stay intact */
+:focus { outline: none; }
+:focus-visible { outline: 1px dotted #000; outline-offset: -4px; }
+.menu:focus-visible, .help-nav button:focus-visible { outline-color: #fff; background: var(--title); color: #fff; }
+input[type=range]:focus-visible, select:focus-visible, canvas:focus-visible { outline: 1px dotted #000; outline-offset: 1px; }
+.lcd :focus-visible { outline-color: var(--lcdfg); }
+h1.title, h2.title { margin: 0; font: inherit; font-weight: bold; }
+.titlebar { padding-left: 6px; }
+.titlebar .sysbox { border: 0; padding: 0; cursor: pointer; flex: none; }
+button.menu { background: none; border: 0; font: inherit; color: inherit; }
+button.menu:hover, button.menu:focus-visible { background: var(--title); color: #fff; }
+
+/* voices + arranger channels are real buttons now */
+button.vrow { width: 100%; background: none; border: 0; font: inherit; color: inherit; text-align: left; }
+button.vrow[aria-pressed=true] .vname { text-decoration: line-through; }
+.arow button.num { background: none; border: 0; font: inherit; font-family: "Lucida Console", monospace; text-align: right; cursor: pointer; padding: 0 2px; color: inherit; }
+.arow.muted button.num { text-decoration: line-through; }
+
+/* keyboard dock: always on screen at the bottom of the window */
+.window#win { display: flex; flex-direction: column; }
+.dock { position: sticky; bottom: 0; z-index: 20; background: var(--face); border-top: 1px solid var(--dk); box-shadow: inset 0 1px var(--hi), 0 -2px 0 rgba(0,0,0,.18); }
+.dock .keys { padding: 4px 8px 6px; }
+.keyrow { display: flex; align-items: center; gap: 6px 14px; flex-wrap: wrap; }
+.kb-inst select { max-width: 230px; }
+.octave { display: inline-flex; align-items: center; gap: 4px; }
+.octave .btn.small { padding: 0 5px; min-width: 22px; }
+#octLabel { min-width: 40px; text-align: center; }
+.kbhint { color: #202020; flex: 1 1 260px; }
+.kbhint b { display: inline-block; min-width: 1.4em; text-align: center; background: #fff; border: 1px solid #000; box-shadow: inset -1px -1px var(--lo); padding: 0 2px; font: bold 11px "Lucida Console", monospace; }
+#dockToggle { margin-left: auto; }
+.dock #piano { height: 84px; margin-top: 5px; }
+#piano .lbl { position: absolute; left: 0; right: 0; bottom: 4px; text-align: center; font: bold 11px "Lucida Console", monospace; color: #000; pointer-events: none; }
+#piano .w, #piano .b { position: relative; }
+#piano .b { position: absolute; }
+#piano .b .lbl { color: #fff; bottom: 3px; font-size: 10px; }
+#piano .lbl.oct { color: #555; font-weight: normal; font-size: 9px; }
+#piano .w.qw { background: #fffbe6; }
+#piano .b.qw { background: #2a2a40; }
+.statusbar { border-top: 1px solid var(--lo); }
+
+/* ---------- Help window ---------- */
+.dialog.help .window { max-width: 880px; width: 100%; height: min(86vh, 680px); display: flex; flex-direction: column; }
+.help-bar { display: flex; gap: 4px; padding: 4px 6px; border-bottom: 1px solid var(--lo); flex: none; }
+.help-gap { flex: 1; }
+.help-panes { flex: 1; display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 0; }
+.help-nav { display: flex; flex-direction: column; gap: 1px; padding: 6px; border-right: 1px solid var(--lo); overflow: auto; background: var(--face); }
+.help-nav button { text-align: left; background: none; border: 0; font: inherit; padding: 3px 6px; cursor: pointer; color: #000; }
+.help-nav button:hover { text-decoration: underline; }
+.help-nav button.on { background: var(--title); color: #fff; }
+.help-text { overflow: auto; padding: 10px 16px 18px; background: #fff; box-shadow: inset 1px 1px var(--lo); font-size: 13px; line-height: 1.5; user-select: text; }
+.help-text h3 { margin: 10px 0 6px; font-size: 14px; }
+.help-text .help-h { margin-top: 0; font-size: 17px; color: var(--title); }
+.help-text ul, .help-text ol { padding-left: 22px; margin: 6px 0 10px; }
+.help-text li { margin: 3px 0; }
+.help-text a { color: var(--title); }
+.keymap { background: var(--lcd); color: var(--lcdfg); font: 13px/1.5 "Lucida Console", "Courier New", monospace; padding: 8px 12px; overflow: auto; }
+.keys-table { border-collapse: collapse; margin: 6px 0 10px; }
+.keys-table th, .keys-table td { text-align: left; padding: 3px 10px 3px 0; vertical-align: top; border-bottom: 1px solid #ddd; }
+.keys-table th { font-family: "Lucida Console", monospace; white-space: nowrap; }
+.mlist li { margin-bottom: 6px; }
+@media (max-width: 760px) {
+  .help-panes { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .help-nav { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--lo); max-height: 30vh; }
+  .dialog.help .window { height: 92vh; }
+  .dock #piano { height: 64px; }
+  .kbhint { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+.plate .p-maker { right: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 760px) { .mtop { flex-wrap: wrap; } }

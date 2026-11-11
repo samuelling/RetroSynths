@@ -44,12 +44,14 @@ export function mountEditor(el, inst, kit, onChange, ctx) {
     } else kit.note(g, `${String(inst.bank).padStart(3, '0')}:${String(inst.program).padStart(3, '0')} · ${zones.length} zone${zones.length === 1 ? '' : 's'} · Copy it to point a new instrument at another preset.`);
     // zones browser
     const box = document.createElement('div'); box.className = 'emu-zones';
+    box.setAttribute('role', 'listbox'); box.setAttribute('aria-label', 'Zones: pick Global or one zone to edit'); box.tabIndex = 0;
     box.style.cssText = 'max-height:170px;overflow:auto;background:#fff;box-shadow:inset 1px 1px #808080;font:11px "Lucida Console",monospace';
     g.appendChild(box);
     const rowOf = (label, zi) => {
       const r = document.createElement('div'); r.textContent = label; r.style.cssText = 'padding:1px 5px;cursor:pointer;white-space:nowrap';
-      if (scope === zi) { r.style.background = '#000080'; r.style.color = '#fff'; }
-      r.onclick = () => { scope = zi; build(); };
+      r.setAttribute('role', 'option'); r.setAttribute('aria-selected', String(scope === zi)); r.id = 'emuz' + (zi + 1);
+      if (scope === zi) { r.style.background = '#000080'; r.style.color = '#fff'; box.setAttribute('aria-activedescendant', r.id); }
+      r.onclick = () => { scope = zi; build(); setTimeout(() => { const b = document.querySelector('.emu-zones'); if (b) b.focus(); }); };
       box.appendChild(r);
     };
     rowOf(`★ Global — offsets on all ${zones.length} zones${Object.keys(inst.ov).length ? ' (edited)' : ''}`, -1);
@@ -58,6 +60,12 @@ export function mountEditor(el, inst, kit, onChange, ctx) {
       const nm = meta.instNames[z.inst] || 'inst ' + z.inst;
       rowOf(`${String(zi + 1).padStart(2)} ${noteName(z.kl).padEnd(4)}–${noteName(z.kh).padEnd(4)} v${z.vl}-${z.vh} ${nm.slice(0, 16).padEnd(16)} root ${noteName(z.root)} ${Math.round(z.sr)}Hz ${len} ${loop}${inst.zov[zi] ? ' *' : ''}`, zi);
     });
+    box.onkeydown = (e) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      e.preventDefault(); e.stopPropagation();
+      scope = Math.max(-1, Math.min(zones.length - 1, scope + (e.key === 'ArrowDown' ? 1 : -1))); build();
+      setTimeout(() => { const b = document.querySelector('.emu-zones'); if (b) { b.focus(); const a = b.querySelector('[aria-selected=true]'); if (a) a.scrollIntoView({ block: 'nearest' }); } });
+    };
     const rr = kit.row(g);
     kit.button(rr, 'Reset overrides', () => { if (scope < 0) inst.ov = {}; else delete inst.zov[scope]; onChange(inst); build(); });
     kit.note(rr, scope < 0 ? 'Global: moves every zone by the same amount' : `Zone ${scope + 1}: absolute values for this zone`);

@@ -182,12 +182,20 @@ function fmEditor(el, inst, kit, ch) {
   const heads = inst.op.map(() => { const d = cell(); d.style.fontWeight = 'bold'; d.style.textAlign = 'center'; return d; });
   lab('Envelope', 'AR → D1R → SL → D2R → key off → RR (dB, log-compressed time; TL lowers the curve)');
   const graphs = inst.op.map((op) => { const d = cell(); return kit.canvas(d, { width: 200, height: 74, draw: (c, w, h) => drawEnv(c, w, h, op) }); });
-  const rowOf = (label, title, make) => { lab(label, title); inst.op.forEach((op, i) => make(cell(), op, i)); };
+  const rowOf = (label, title, make) => {
+    lab(label, title);
+    inst.op.forEach((op, i) => {
+      const c = cell(); make(c, op, i);
+      c.querySelectorAll('input[type=range], select').forEach(x => x.setAttribute('aria-label', `${label}, operator ${i + 1}`));
+      c.querySelectorAll('.ed-val').forEach(x => x.setAttribute('aria-hidden', 'true'));
+    });
+  };
   const rng = (parent, { min, max, value, fmt = String, onInput }) => {
     parent.style.cssText += ';display:grid;grid-template-columns:minmax(40px,1fr) 44px;gap:4px;align-items:center';
     const r = document.createElement('input'); r.type = 'range'; r.min = min; r.max = max; r.value = value; r.style.width = '100%'; r.style.accentColor = 'var(--title)';
     const o = document.createElement('span'); o.className = 'ed-val'; o.textContent = fmt(+value);
-    r.oninput = () => { o.textContent = fmt(+r.value); onInput(+r.value); };
+    r.setAttribute('aria-valuetext', fmt(+value));
+    r.oninput = () => { o.textContent = fmt(+r.value); r.setAttribute('aria-valuetext', o.textContent); onInput(+r.value); };
     parent.append(r, o);
   };
   const P = (label, title, key, max, fmt) => rowOf(label, title, (c, op, i) => rng(c, { min: 0, max, value: op[key], fmt, onInput: (v) => { op[key] = v; graphs[i].redraw(); ch(); } }));

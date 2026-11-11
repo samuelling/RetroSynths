@@ -118,7 +118,7 @@ export function mountEditor(el, inst, kit, onChange, ctx) {
       const mode = kit.bits(r, { items: [{ key: 'abs', label: 'ABS', value: !!e[2] }], onChange: (k, v) => {
         e[2] = v ? 1 : 0; e[1] = v ? Math.max(0, Math.min(127, 60 + e[1])) : Math.max(-48, Math.min(48, e[1] - 60)); selRow = i; buildTable(); ch(); } });
       mode.el.title = 'ABS = fixed MIDI note; otherwise semitones relative to the played key';
-      kit.number(r, { min: e[2] ? 0 : -48, max: e[2] ? 127 : 48, value: e[1], width: 42, onChange: (v) => { e[1] = v; nl.textContent = lab(); ch(); } });
+      kit.number(r, { ariaLabel: `Row ${i + 1} ${e[2] ? 'note' : 'semitones'}`, min: e[2] ? 0 : -48, max: e[2] ? 127 : 48, value: e[1], width: 42, onChange: (v) => { e[1] = v; nl.textContent = lab(); ch(); } });
       const lab = () => e[2] ? noteName(e[1]) : (e[1] >= 0 ? '+' : '') + e[1];
       const nl = document.createElement('span'); nl.textContent = lab(); nl.style.width = '28px'; r.appendChild(nl);
       tbl.appendChild(r);

@@ -5,7 +5,7 @@ General MIDI through four generations of PC sound card, in the browser. You drag
 | Era | Card | Engine |
 |---|---|---|
 | 1989 | AdLib / Sound Blaster 2.0 | Cycle-accurate OPL FM in OPL2 mode: 9 voices, 4 waveforms, mono |
-| 1992 | Sound Blaster 16 · Windows 3.1 | Cycle-accurate YMF262 (OPL3): 18 voices, 8 waveforms, hard L/R stereo |
+| 1992 | Sound Blaster 16 · early-90s PC | Cycle-accurate YMF262 (OPL3): 18 voices, 8 waveforms, hard L/R stereo |
 | 1994 | Sound Blaster AWE32 | EMU8000-style wavetable: 30 voices, ROM-budget bank, linear interpolation, gritty reverb |
 | 1998 | Sound Blaster Live! | EMU10K1-style wavetable: 64 voices, 8-point interpolation, SF2.01 modulators, smoother reverb |
 

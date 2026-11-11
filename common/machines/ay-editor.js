@@ -31,8 +31,9 @@ export function drawShape(g, s, x, y, w, h, color = FG) {
 function mixerMacro(kit, parent, m, onChange, width = 512) {
   const maxLength = 64;
   const box = document.createElement('div'); box.className = 'ed-macro'; parent.appendChild(box);
+  let cur = 0;
   const cv = kit.canvas(box, {
-    width, height: 44, label: 'Mixer (frames) — T = tone, N = noise',
+    width, height: 44, label: 'Mixer (frames) — T = tone, N = noise (keys: ↑ toggles tone, ↓ toggles noise)',
     draw: (g, w, h) => {
       g.fillStyle = BG; g.fillRect(0, 0, w, h);
       const bw = w / maxLength;
@@ -49,11 +50,23 @@ function mixerMacro(kit, parent, m, onChange, width = 512) {
       if (m.loop >= 0) { g.fillStyle = HI; g.fillRect(m.loop * bw, 0, 2, h); }
       if (m.release >= 0) { g.fillStyle = '#e2463b'; g.fillRect(m.release * bw, 0, 2, h); }
       g.fillStyle = '#fff'; g.fillText('T', 2, h / 4); g.fillText('N', 2, 3 * h / 4);
+      if (document.activeElement === g.canvas && m.values.length) { g.strokeStyle = '#f2c63a'; g.lineWidth = 2; g.strokeRect(Math.min(cur, m.values.length - 1) * bw + 1, 1, bw - 2, h - 2); }
     },
     onPointer: (kind, x, y) => {
       if (kind !== 'down') return;
       const i = Math.floor(x / width * maxLength); if (i >= m.values.length) return;
       m.values[i] ^= (y < 22 ? 1 : 2); cv.redraw(); onChange();
+    },
+    onKey: (k) => {
+      const n = m.values.length; if (!n) return null;
+      cur = Math.min(cur, n - 1);
+      if (k === 'ArrowLeft') cur = (cur + n - 1) % n;
+      else if (k === 'ArrowRight') cur = (cur + 1) % n;
+      else if (k === 'ArrowUp') { m.values[cur] ^= 1; onChange(); }
+      else if (k === 'ArrowDown') { m.values[cur] ^= 2; onChange(); }
+      else return null;
+      const v = m.values[cur];
+      return `frame ${cur + 1} of ${n}: tone ${v & 1 ? 'on' : 'off'}, noise ${v & 2 ? 'on' : 'off'}`;
     },
   });
   const r = kit.row(box);
@@ -174,6 +187,8 @@ export function mountAYEditor(el, inst, kit, onChange, ctx) {
         if (on) { g.strokeStyle = HI; g.lineWidth = 2; g.strokeRect(1, 1, w - 2, h - 2); }
       },
       onPointer: (kind) => { if (kind !== 'down') return; env.shape = s; shapeCvs.forEach(x => x.redraw()); envInfo(); fire(); },
+      onKey: (k) => { if (k !== 'Enter' && k !== ' ') return null; env.shape = s; shapeCvs.forEach(x => x.redraw()); envInfo(); fire(); return `envelope shape ${s < 0 ? 'off' : s} selected`; },
+      ariaLabel: s < 0 ? 'Envelope off' : `Envelope shape ${s}`, keyHint: '', role: 'button',
     });
     c.el.title = s < 0 ? 'Envelope off (fixed volume)' : `R13 = ${s}: ${[s & 8 ? 'CONT' : '', s & 4 ? 'ATT' : '', s & 2 ? 'ALT' : '', s & 1 ? 'HOLD' : ''].filter(Boolean).join(' ') || '—'}`;
     shapeCvs.push(c);

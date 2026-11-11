@@ -19,7 +19,7 @@ export const GM_NAMES = [
 
 export const ERAS = [
   { short: 'OPL2', card: 'AdLib / Sound Blaster 2.0', chip: 'Yamaha YM3812 · OPL2', year: '1989', spec: '9 voices · 49,716 Hz · 4 waveforms · mono float DAC' },
-  { short: 'OPL3', card: 'Sound Blaster 16 · Windows 3.1', chip: 'Yamaha YMF262 · OPL3', year: '1992', spec: '18 voices · 49,716 Hz · 8 waveforms · L/R stereo' },
+  { short: 'OPL3', card: 'Sound Blaster 16 · early-90s PC', chip: 'Yamaha YMF262 · OPL3', year: '1992', spec: '18 voices · 49,716 Hz · 8 waveforms · L/R stereo' },
   { short: 'AWE32', card: 'Sound Blaster AWE32', chip: 'E-mu EMU8000', year: '1994', spec: '30 voices · ROM-style bank · linear interp · gritty reverb' },
   { short: 'Live!', card: 'Sound Blaster Live!', chip: 'E-mu EMU10K1', year: '1998', spec: '64 voices · SoundFont bank · 8-point interp · SF2.01 modulators' },
 ];

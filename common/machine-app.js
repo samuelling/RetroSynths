@@ -5,6 +5,7 @@ import { demoSong } from './demo.js';
 import { GM_NAMES, GM_DRUMS, noteName } from './gm.js';
 import { MACHINES, GROUPS } from './machines/registry.js';
 import kit from './editor-kit.js';
+import { openHelp, wireDialogs } from './help.js';
 
 const $ = (id) => document.getElementById(id);
 const GROUP = document.body.dataset.group;
@@ -294,19 +295,26 @@ function buildVoices() {
   box.classList.toggle('compact', V.length > 18);
   if (!V.length) { box.innerHTML = '<div class="ed-note">This machine does not list its voices yet.</div>'; return; }
   V.forEach((v, i) => {
-    const r = document.createElement('div'); r.className = 'vrow';
+    const r = document.createElement('button'); r.type = 'button'; r.className = 'vrow'; r.setAttribute('aria-pressed', 'false');
     r.innerHTML = `<span class="vname"></span><span class="vwhat"></span><span class="mt"><i></i></span>`;
-    r.querySelector('.vname').textContent = v.name; r.title = `${v.name} (${v.kind})`;
+    r.querySelector('.vname').textContent = v.name; r.title = `${v.name} (${v.kind}) — click to mute, double-click (or Shift+Enter) to solo`;
+    r.querySelector('.vwhat').setAttribute('aria-hidden', 'true'); r.querySelector('.mt').setAttribute('aria-hidden', 'true');
     let t = 0;
     r.onclick = () => { clearTimeout(t); t = setTimeout(() => { if (V.length > 31) { if (app.vmuteSet.has(i)) app.vmuteSet.delete(i); else app.vmuteSet.add(i); } else app.voiceMute ^= (1 << i); applyVoiceMute(); }, 220); };
     r.ondblclick = () => { clearTimeout(t); app.voiceSolo = app.voiceSolo === i ? -1 : i; applyVoiceMute(); };
+    r.onkeydown = (e) => { if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); r.ondblclick(); } };
     box.appendChild(r);
     vRows.push({ el: r, what: r.querySelector('.vwhat'), bar: r.querySelector('i'), lvl: 0 });
   });
 }
 function applyVoiceMute() {
   const m = effectiveVoiceMute();
-  vRows.forEach((r, i) => { r.el.classList.toggle('muted', isVMuted(m, i)); r.el.classList.toggle('solo', app.voiceSolo === i); });
+  vRows.forEach((r, i) => {
+    const mu = isVMuted(m, i), so = app.voiceSolo === i;
+    r.el.classList.toggle('muted', mu); r.el.classList.toggle('solo', so);
+    r.el.setAttribute('aria-pressed', String(mu));
+    r.el.setAttribute('aria-label', `${r.el.querySelector('.vname').textContent}${so ? ', soloed' : ''}${mu ? ', muted' : ''}`);
+  });
   post({ t: 'voicemute', id: app.id, mask: m });
 }
 
@@ -357,9 +365,12 @@ function renderArranger() {
     const prog = app.programs[c];
     const isDrum = c === 9 || app.drums[c];
     const r = document.createElement('div'); r.className = 'arow';
-    r.innerHTML = `<span class="num" title="Click to mute">${c + 1}</span><span class="gm"></span><select class="ai"></select><select class="av"></select><span class="mt"><i></i></span>`;
+    r.innerHTML = `<button type="button" class="num" title="Mute / unmute this MIDI channel" aria-pressed="false">${c + 1}</button><span class="gm"></span><select class="ai"></select><select class="av"></select><span class="mt" aria-hidden="true"><i></i></span>`;
     r.querySelector('.gm').textContent = isDrum ? 'Drums' : GM_NAMES[prog];
     const si = r.querySelector('.ai'), sv = r.querySelector('.av');
+    const partName = isDrum ? 'Drums' : GM_NAMES[prog];
+    si.setAttribute('aria-label', `Channel ${c + 1} (${partName}) instrument`); sv.setAttribute('aria-label', `Channel ${c + 1} (${partName}) voice`);
+    r.querySelector('.num').setAttribute('aria-label', `Mute MIDI channel ${c + 1} (${partName})`);
     const autoIdx = isDrum ? -1 : (M().gmPreset ? safeGM(prog) : -1);
     const kitIdx = isDrum && M().gmKit ? (() => { try { return M().gmKit(prog); } catch { return -1; } })() : -1;
     instOptions(si, { auto: isDrum ? (kitIdx >= 0 ? `Auto · ${instName(kitIdx)}` : 'Auto · drum kit') : `Auto · ${instName(autoIdx)}` });
@@ -368,8 +379,8 @@ function renderArranger() {
     voiceOptions(sv, isDrum && S.arr[c].inst < 0 ? null : kindNow(), S.arr[c].voice);
     si.onchange = () => { S.arr[c].inst = +si.value; voiceOptions(sv, kindNow(), S.arr[c].voice); S.arr[c].voice = sv.value; pushArr(); if (S.arr[c].inst >= 0) selectInst(S.arr[c].inst); };
     sv.onchange = () => { S.arr[c].voice = sv.value; pushArr(); };
-    r.querySelector('.num').onclick = () => { app.midiMute[c] ^= 1; r.classList.toggle('muted', !!app.midiMute[c]); post({ t: 'mute', v: app.midiMute }); };
-    r.classList.toggle('muted', !!app.midiMute[c]);
+    r.querySelector('.num').onclick = () => { app.midiMute[c] ^= 1; r.classList.toggle('muted', !!app.midiMute[c]); r.querySelector('.num').setAttribute('aria-pressed', String(!!app.midiMute[c])); post({ t: 'mute', v: app.midiMute }); };
+    r.classList.toggle('muted', !!app.midiMute[c]); r.querySelector('.num').setAttribute('aria-pressed', String(!!app.midiMute[c]));
     box.appendChild(r);
     aRows.push({ c, bar: r.querySelector('i'), lvl: 0 });
   }
@@ -380,8 +391,8 @@ $('arrReset').onclick = () => { S.arr = S.arr.map(() => ({ inst: -1, voice: 'aut
 // ------------------------------------------------------------ Instruments panel
 let editorHandle = null, editorToken = 0;
 function renderInstList() {
-  instOptions($('instList'));
-  $('instList').value = S.sel;
+  instOptions($('instList')); instOptions($('kbInst'));
+  $('instList').value = S.sel; $('kbInst').value = S.sel;
 }
 async function selectInst(i, quiet) {
   if (!S.table.length) { $('instName').textContent = '(no native instruments yet)'; $('instEditor').innerHTML = ''; return; }
@@ -390,7 +401,8 @@ async function selectInst(i, quiet) {
   const inst = S.table[S.sel];
   $('instName').textContent = inst.name;
   $('instKind').textContent = inst.kind || '';
-  $('kbInst').textContent = inst.name;
+  if ($('kbInst').options.length !== $('instList').options.length) instOptions($('kbInst'));
+  $('kbInst').value = S.sel;
   const users = S.arr.map((a, c) => a.inst === S.sel ? c + 1 : 0).filter(Boolean);
   $('instUse').textContent = users.length ? `used by MIDI ch ${users.join(', ')}` : '';
   $('instReset').disabled = !!inst.user || S.sel >= nPresets();
@@ -449,6 +461,7 @@ function resetTable(id = app.id) {
   if (id === app.id) { loadState(); post({ t: 'instruments', id, list: S.table }); renderInstList(); selectInst(S.sel, true); }
 }
 $('instList').onchange = () => selectInst(+$('instList').value);
+$('kbInst').onchange = () => { selectInst(+$('kbInst').value); $('kbInst').blur(); };   // blur so typed letters play notes again
 $('instCopy').onclick = () => {
   const src = S.table[S.sel]; if (!src) return;
   const copy = clone(src); copy.name = uniqueName(src.name.replace(/ \(copy.*\)$/, '') + ' (copy)'); copy.user = true;
@@ -540,7 +553,7 @@ class Player {
     this.t0 = ctx.currentTime + 0.06 - this.pos;
     const ev = this.song.events;
     this.idx = 0; while (this.idx < ev.length && ev[this.idx][0] < this.pos) this.idx++;
-    this.playing = true; $('btnPlay').innerHTML = '&#10074;&#10074;';
+    this.playing = true; $('btnPlay').innerHTML = '&#10074;&#10074;'; $('btnPlay').setAttribute('aria-label', 'Pause');
     this.pump(); this.timer = setInterval(() => this.pump(), 25);
   }
   pump() {
@@ -555,7 +568,7 @@ class Player {
   halt() {
     clearInterval(this.timer); this.timer = 0;
     if (this.playing) { post({ t: 'clearq' }); for (let c = 0; c < 16; c++) { sendNow(0xB0 | c, 123, 0); sendNow(0xB0 | c, 64, 0); } }
-    this.playing = false; $('btnPlay').innerHTML = '&#9654;';
+    this.playing = false; $('btnPlay').innerHTML = '&#9654;'; $('btnPlay').setAttribute('aria-label', 'Play');
   }
   pause() { if (!this.playing) return; this.pos = ctx.currentTime - this.t0; this.halt(); }
   stop() { this.halt(); this.pos = 0; this.updateTime(); }
@@ -596,8 +609,13 @@ $('btnDemo').onclick = $('menuDemo').onclick = async () => { if (!ctx) await pow
 $('seek').oninput = () => { seeking = true; };
 $('seek').onchange = (e) => { seeking = false; player.seek(+e.target.value / 1000); };
 $('menuPanic').onclick = () => { player.halt(); post({ t: 'reset' }); };
-$('menuAbout').onclick = () => { $('about').hidden = false; };
+$('menuHelp').onclick = () => openHelp(helpCtx());
 $('aboutOK').onclick = () => { $('about').hidden = true; };
+wireDialogs();
+// buttons that open a hidden file input (keyboard-reachable, unlike a bare <label for>)
+document.querySelectorAll('[data-file]').forEach(b => b.addEventListener('click', () => $(b.dataset.file).click()));
+const helpCtx = () => ({ GROUP, APP_NAME, IDS, MACHINES, current: app.id, extra: EXT && EXT.helpTopics ? EXT.helpTopics() : [] });
+window.addEventListener('keydown', (e) => { if (e.key === 'F1') { e.preventDefault(); openHelp(helpCtx()); } });
 $('fileMidi').onchange = async (e) => { const f = e.target.files[0]; if (f) await openMidi(f); e.target.value = ''; };
 async function openMidi(file) {
   try {
@@ -654,38 +672,72 @@ requestAnimationFrame(frame);
 
 // ------------------------------------------------------------ keyboard + Web MIDI (play the selected instrument on ch 16)
 const held = new Map(), pianoKeys = new Map();
+const QW = 'awsedftgyhujkolp;';                 // a=C … k=C' … ;=E' (white row + black keys above)
 function liveOn(note, vel = 100) { if (!ctx || held.has(note)) return; held.set(note, 1); sendNow(0x90 | KB_CH, note, vel); keyEl(note, true); }
 function liveOff(note) { if (!held.has(note)) return; sendNow(0x80 | KB_CH, note, 0); held.delete(note); keyEl(note, false); }
 function keyEl(n, down) { const el = pianoKeys.get(n); if (el) el.classList.toggle('down', down); }
+/** letters of the computer keyboard printed on the keys they play, for the current octave */
+function labelKeys() {
+  const base = 12 * (app.octave + 1);
+  for (const [n, el] of pianoKeys) {
+    const i = n - base, lb = el.firstChild;
+    const on = i >= 0 && i < QW.length;
+    el.classList.toggle('qw', on);
+    lb.textContent = on ? (QW[i] === ';' ? ';' : QW[i].toUpperCase()) : (n % 12 === 0 && !el.classList.contains('b') ? 'C' + (n / 12 - 1) : '');
+    lb.classList.toggle('oct', !on);
+  }
+  $('octLabel').textContent = 'Oct ' + app.octave;
+}
+function setOctave(o) {
+  for (const n of [...held.keys()]) liveOff(n);
+  app.octave = Math.max(1, Math.min(7, o)); labelKeys();
+}
 (function buildPiano() {
   const WIDE = window.innerWidth > 760, LO = WIDE ? 36 : 48, HI = WIDE ? 95 : 83;
   const p = $('piano'), whites = [], BL = [1, 3, 6, 8, 10];
+  const mk = (cls, n) => { const d = document.createElement('div'); d.className = cls; d.dataset.n = n; const l = document.createElement('span'); l.className = 'lbl'; d.appendChild(l); p.appendChild(d); pianoKeys.set(n, d); return d; };
   for (let n = LO; n <= HI; n++) if (!BL.includes(n % 12)) whites.push(n);
-  whites.forEach(n => { const d = document.createElement('div'); d.className = 'w'; d.dataset.n = n; p.appendChild(d); pianoKeys.set(n, d); });
+  whites.forEach(n => mk('w', n));
   const ww = 100 / whites.length;
   for (let n = LO; n <= HI; n++) if (BL.includes(n % 12)) {
-    const wi = whites.indexOf(n - 1), d = document.createElement('div');
-    d.className = 'b'; d.dataset.n = n; d.style.left = `calc(${(wi + 1) * ww}% - ${ww * 0.3}%)`; d.style.width = `${ww * 0.6}%`;
-    p.appendChild(d); pianoKeys.set(n, d);
+    const wi = whites.indexOf(n - 1), d = mk('b', n);
+    d.style.left = `calc(${(wi + 1) * ww}% - ${ww * 0.3}%)`; d.style.width = `${ww * 0.6}%`;
   }
   const ptr = new Map();
-  const noteAt = (e) => { const el = document.elementFromPoint(e.clientX, e.clientY); return el && el.dataset && el.dataset.n ? +el.dataset.n : null; };
+  const noteAt = (e) => { const el = document.elementFromPoint(e.clientX, e.clientY); const k = el && el.closest && el.closest('#piano [data-n]'); return k ? +k.dataset.n : null; };
   p.addEventListener('pointerdown', (e) => { const n = noteAt(e); if (n == null) return; p.setPointerCapture(e.pointerId); ptr.set(e.pointerId, n); liveOn(n, 70 + Math.round(Math.random() * 30)); });
   p.addEventListener('pointermove', (e) => { if (!ptr.has(e.pointerId)) return; const n = noteAt(e), o = ptr.get(e.pointerId); if (n != null && n !== o) { liveOff(o); liveOn(n, 90); ptr.set(e.pointerId, n); } });
   const up = (e) => { if (!ptr.has(e.pointerId)) return; liveOff(ptr.get(e.pointerId)); ptr.delete(e.pointerId); };
   p.addEventListener('pointerup', up); p.addEventListener('pointercancel', up);
+  labelKeys();
 })();
-const QW = 'awsedftgyhujkolp;';
+$('octDown').onclick = () => setOctave(app.octave - 1);
+$('octUp').onclick = () => setOctave(app.octave + 1);
+(function dockToggle() {
+  const b = $('dockToggle');
+  const set = (hide) => { $('piano').hidden = hide; b.textContent = hide ? 'Show keys' : 'Hide keys'; b.setAttribute('aria-expanded', String(!hide)); try { localStorage.setItem('retrosynths.dock.hidden', hide ? '1' : ''); } catch {} };
+  b.onclick = () => set(!$('piano').hidden);
+  let hidden = false; try { hidden = localStorage.getItem('retrosynths.dock.hidden') === '1'; } catch {}
+  set(hidden);
+})();
+// typing plays notes everywhere except where letters mean something (text boxes, lists, dropdowns)
+const typingTarget = (t) => t && (t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable ||
+  (t.tagName === 'INPUT' && !['range', 'checkbox', 'radio', 'button'].includes(t.type)));
 window.addEventListener('keydown', (e) => {
-  if (!ctx || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
-  const t = e.target; if (t.tagName === 'SELECT' || (t.tagName === 'INPUT' && t.type !== 'range' && t.type !== 'checkbox') || t.isContentEditable) return;
+  if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+  if ([...document.querySelectorAll('.dialog')].some(d => !d.hidden)) return;      // dialogs own the keyboard
+  const t = e.target; if (typingTarget(t)) return;
   const k = e.key.toLowerCase();
-  if (k === 'z') { app.octave = Math.max(1, app.octave - 1); $('octLabel').textContent = 'Oct ' + app.octave; return; }
-  if (k === 'x') { app.octave = Math.min(7, app.octave + 1); $('octLabel').textContent = 'Oct ' + app.octave; return; }
-  if (k === ' ') { e.preventDefault(); $('btnPlay').click(); return; }
-  const i = QW.indexOf(k); if (i >= 0) liveOn(12 * (app.octave + 1) + i, 100);
+  if (k === 'z') { setOctave(app.octave - 1); return; }
+  if (k === 'x') { setOctave(app.octave + 1); return; }
+  if (k === ' ') {
+    if (t.closest && t.closest('button, a, summary, [role=button]')) return;       // Space presses the focused button
+    e.preventDefault(); $('btnPlay').click(); return;
+  }
+  const i = QW.indexOf(k); if (i >= 0) { if (!ctx) initAudio(); liveOn(12 * (app.octave + 1) + i, 100); }
 });
 window.addEventListener('keyup', (e) => { const i = QW.indexOf(e.key.toLowerCase()); if (i < 0) return; for (let o = 1; o <= 7; o++) liveOff(12 * (o + 1) + i); });
+window.addEventListener('blur', () => { for (const n of [...held.keys()]) liveOff(n); });
 let midiAccess = null;
 $('midiIn').addEventListener('pointerdown', async () => {
   if (midiAccess || !navigator.requestMIDIAccess) { if (!navigator.requestMIDIAccess) setStatus('Web MIDI is not available in this browser.'); return; }

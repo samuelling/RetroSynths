@@ -13,15 +13,15 @@
 
 <div id="desktop">
   <div class="window" id="win">
-    <div class="titlebar"><span class="sysbox">&#9644;</span><span class="title">Console — RetroSynths</span><span class="tbtn">&#9660;</span><span class="tbtn">&#9650;</span></div>
-    <div class="menubar">
-      <label class="menu" for="fileMidi"><u>F</u>ile…</label>
-      <span class="menu" id="menuDemo"><u>D</u>emo</span>
-      <span class="menu" id="menuPanic"><u>P</u>anic</span>
-      <span class="menu" id="menuAbout"><u>H</u>elp</span>
+    <header class="titlebar"><h1 class="title">Console — RetroSynths</h1></header>
+    <nav class="menubar" aria-label="Menu">
+      <button type="button" class="menu" data-file="fileMidi" title="Open a MIDI file (.mid)"><u>O</u>pen…</button>
+      <button type="button" class="menu" id="menuDemo" title="Play the demo song"><u>D</u>emo</button>
+      <button type="button" class="menu" id="menuPanic" title="Silence every note (if something gets stuck)"><u>P</u>anic</button>
+      <button type="button" class="menu" id="menuHelp" title="How to use this app (F1)"><u>H</u>elp</button>
       <input type="file" id="fileMidi" accept=".mid,.midi,.rmi,.kar" hidden>
-    </div>
-    <div class="body">
+    </nav>
+    <main class="body">
       <fieldset class="group machine">
         <legend>Console</legend>
         <div class="mtop">
@@ -37,21 +37,21 @@
       </fieldset>
 
       <fieldset class="group transport">
-        <legend>Media Player</legend>
+        <legend>Player</legend>
         <div class="row">
-          <button class="btn" id="btnPlay" title="Play / Pause">&#9654;</button>
-          <button class="btn" id="btnStop" title="Stop">&#9632;</button>
-          <label class="btn" for="fileMidi" title="Open MIDI file">Open…</label>
-          <button class="btn" id="btnDemo">Demo</button>
+          <button class="btn" id="btnPlay" type="button" title="Play / Pause (Space)" aria-label="Play">&#9654;</button>
+          <button class="btn" id="btnStop" type="button" title="Stop" aria-label="Stop">&#9632;</button>
+          <button type="button" class="btn" data-file="fileMidi" title="Open a MIDI file">Open…</button>
+          <button class="btn" id="btnDemo" type="button">Demo</button>
           <label class="chk"><input type="checkbox" id="chkLoop"> Loop</label>
         </div>
-        <div class="row"><input type="range" id="seek" min="0" max="1000" value="0"></div>
-        <div class="row lcd"><span id="songTitle">No song loaded</span><span id="songTime">00:00 / 00:00</span></div>
+        <div class="row"><input type="range" id="seek" min="0" max="1000" value="0" aria-label="Song position"></div>
+        <div class="row lcd"><span id="songTitle" aria-live="polite">No song loaded</span><span id="songTime">00:00 / 00:00</span></div>
       </fieldset>
 
       <fieldset class="group scopebox">
         <legend>Output</legend>
-        <canvas id="scope" width="512" height="96"></canvas>
+        <canvas id="scope" width="512" height="96" role="img" aria-label="Oscilloscope of the sound output"></canvas>
         <div class="row"><label>Volume <input type="range" id="vol" min="0" max="1.5" step="0.01" value="0.8"></label></div>
       </fieldset>
 
@@ -70,7 +70,7 @@
         <legend>Instruments</legend>
         <div class="inst-wrap">
           <div class="inst-side">
-            <select id="instList" size="18"></select>
+            <select id="instList" size="18" aria-label="Instruments"></select>
             <div class="row">
               <button class="btn small" id="instCopy" type="button" title="Make an editable copy">Copy</button>
               <button class="btn small" id="instRename" type="button">Rename</button>
@@ -80,7 +80,7 @@
             <div class="row">
               <button class="btn small" id="kitBtn" type="button">Drum kit…</button>
               <button class="btn small" id="instExport" type="button" title="Save this machine's instruments to a file">Export</button>
-              <label class="btn small" for="instImport">Import</label>
+              <button type="button" class="btn small" data-file="instImport" title="Load instruments saved with Export">Import</button>
               <input type="file" id="instImport" accept=".json" hidden>
             </div>
           </div>
@@ -92,28 +92,31 @@
         </div>
       </fieldset>
 
-      <fieldset class="group keys">
-        <legend>Keyboard <small>(plays the selected instrument · QWERTY: A W S E D F T G Y H U J K · Z/X octave)</small></legend>
-        <div class="row">
-          <span>Playing: <b id="kbInst"></b></span>
-          <label>MIDI in <select id="midiIn"><option value="">(click to enable)</option></select></label>
-          <span id="octLabel">Oct 4</span>
+    </main>
+    <div class="dock" id="dock">
+      <section class="keys" aria-label="Keyboard">
+        <div class="keyrow">
+          <label class="kb-inst">Keyboard plays <select id="kbInst" aria-label="Instrument the keyboard plays"></select></label>
+          <span class="octave"><button type="button" class="btn small" id="octDown" aria-label="Octave down (Z)" title="Octave down (Z)">&#9664;</button><span id="octLabel" aria-live="polite">Oct 4</span><button type="button" class="btn small" id="octUp" aria-label="Octave up (X)" title="Octave up (X)">&#9654;</button></span>
+          <label class="kb-midi">MIDI in <select id="midiIn"><option value="">(click to enable)</option></select></label>
+          <span class="kbhint" id="kbHint">&#9000; Type the letters on the keys · <b>Z</b> <b>X</b> octave · <b>Space</b> play</span>
+          <button type="button" class="btn small" id="dockToggle" aria-expanded="true" aria-controls="piano">Hide keys</button>
         </div>
-        <div id="piano"></div>
-      </fieldset>
+        <div id="piano" aria-hidden="true"></div>
+      </section>
+      <div class="statusbar" role="region" aria-label="Status"><span id="status" role="status" aria-live="polite">Ready</span><span id="voices"></span></div>
     </div>
-    <div class="statusbar"><span id="status">Ready</span><span id="voices"></span></div>
   </div>
 </div>
 
 <div id="about" class="dialog" hidden>
-  <div class="window">
-    <div class="titlebar"><span class="sysbox">&#9644;</span><span class="title">About Console</span></div>
-    <div class="body about-body">
+  <div class="window" role="dialog" aria-modal="true" aria-labelledby="aboutTitle">
+    <div class="titlebar"><button type="button" class="sysbox" data-close aria-label="Close">&#9644;</button><h2 class="title" id="aboutTitle">About Console</h2></div>
+    <div class="body about-body" id="aboutText">
       <p><b>Console</b> plays music through the sound hardware of five game consoles: the NES (2A03), Super Nintendo (SPC700 + S-DSP), Sega Genesis (YM2612 + SN76489), TurboGrafx-16 (HuC6280) and the original Game Boy.</p>
       <p>Each machine has its <b>own</b> voices and instruments. Pick or edit an instrument and play it on the keyboard (QWERTY, on-screen or Web MIDI). General MIDI files play too: the <b>Arranger</b> shows how each MIDI channel lands on the chip — leave it on Auto or choose any native instrument and voice. Each machine runs an emulation of its own sound chip at the chip's native clock, driven by a period-style music driver that squeezes General MIDI into the hardware's few voices — the way game composers had to.</p>
       <p class="fine">Emulations are written from public hardware documentation (or ported from permissively licensed emulators, see LICENSES). No game, ROM or console sample data is included. Machine names are trademarks of their owners, used only to describe the hardware being emulated.</p>
-      <div class="row right"><button class="btn" id="aboutOK">OK</button></div>
+      <div class="row right"><button class="btn" id="aboutOK" type="button">OK</button></div>
     </div>
   </div>
 </div>

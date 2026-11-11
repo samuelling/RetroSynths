@@ -1,4 +1,4 @@
-// Editor widget kit for machine instrument editors (Windows 3.1 look; styles in common/app.css "editor kit").
+// Editor widget kit for machine instrument editors (early-90s desktop look; styles in common/app.css "editor kit").
 // Every widget appends itself to `parent` and returns a handle { el, set(value) } where useful.
 // Values are plain numbers / strings / arrays; callbacks fire on every user change.
 
@@ -29,9 +29,10 @@ export function slider(parent, { label, min = 0, max = 15, step = 1, value = 0, 
   if (title) r.title = title;
   h('span', 'ed-lab', r, label);
   const inp = h('input', null, r); inp.type = 'range'; inp.min = min; inp.max = max; inp.step = step; inp.value = value;
-  const out = h('span', 'ed-val', r, fmt(+value));
-  inp.oninput = () => { out.textContent = fmt(+inp.value); onInput && onInput(+inp.value); };
-  return { el: r, set(v) { inp.value = v; out.textContent = fmt(+v); } };
+  const out = h('span', 'ed-val', r, fmt(+value)); out.setAttribute('aria-hidden', 'true');
+  inp.setAttribute('aria-valuetext', fmt(+value));
+  inp.oninput = () => { out.textContent = fmt(+inp.value); inp.setAttribute('aria-valuetext', out.textContent); onInput && onInput(+inp.value); };
+  return { el: r, set(v) { inp.value = v; out.textContent = fmt(+v); inp.setAttribute('aria-valuetext', out.textContent); } };
 }
 /** Labelled dropdown. options = [[value, text], …] */
 export function select(parent, { label, options, value, onChange, title }) {
@@ -57,33 +58,35 @@ export function seg(parent, { label, options, value, onChange, title }) {
   const r = h('div', 'ed-seg', parent);
   if (title) r.title = title;
   if (label) h('span', 'ed-lab', r, label);
-  const box = h('span', 'ed-segbox', r);
+  const box = h('span', 'ed-segbox', r); box.setAttribute('role', 'group'); if (label) box.setAttribute('aria-label', label);
+  const mark = (b, on) => { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); };
   const btns = options.map(([v, t]) => {
     const b = h('button', null, box, t); b.type = 'button';
-    b.onclick = () => { btns.forEach(x => x.classList.remove('on')); b.classList.add('on'); onChange && onChange(v); };
-    if (JSON.stringify(v) === JSON.stringify(value)) b.classList.add('on');
+    b.onclick = () => { btns.forEach(x => mark(x, false)); mark(b, true); onChange && onChange(v); };
+    mark(b, JSON.stringify(v) === JSON.stringify(value));
     return b;
   });
-  return { el: r, set(v) { btns.forEach((b, i) => b.classList.toggle('on', JSON.stringify(options[i][0]) === JSON.stringify(v))); } };
+  return { el: r, set(v) { btns.forEach((b, i) => mark(b, JSON.stringify(options[i][0]) === JSON.stringify(v))); } };
 }
 /** Several independent toggle buttons (e.g. SID waveform bits). items = [{ key, label, value }] → onChange(key, bool) */
 export function bits(parent, { label, items, onChange, title }) {
   const r = h('div', 'ed-seg', parent);
   if (title) r.title = title;
   if (label) h('span', 'ed-lab', r, label);
-  const box = h('span', 'ed-segbox', r);
+  const box = h('span', 'ed-segbox', r); box.setAttribute('role', 'group'); if (label) box.setAttribute('aria-label', label);
+  const mark = (b, on) => { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); };
   const btns = items.map((it) => {
-    const b = h('button', null, box, it.label); b.type = 'button'; b.classList.toggle('on', !!it.value);
-    b.onclick = () => { b.classList.toggle('on'); onChange && onChange(it.key, b.classList.contains('on')); };
+    const b = h('button', null, box, it.label); b.type = 'button'; mark(b, !!it.value);
+    b.onclick = () => { mark(b, !b.classList.contains('on')); onChange && onChange(it.key, b.classList.contains('on')); };
     return b;
   });
-  return { el: r, set(key, v) { const i = items.findIndex(x => x.key === key); if (i >= 0) btns[i].classList.toggle('on', !!v); } };
+  return { el: r, set(key, v) { const i = items.findIndex(x => x.key === key); if (i >= 0) mark(btns[i], !!v); } };
 }
 /** Number box. */
-export function number(parent, { label, min, max, step = 1, value, onChange, width = 56 }) {
+export function number(parent, { label, min, max, step = 1, value, onChange, width = 56, ariaLabel }) {
   const r = h('label', 'ed-select', parent);
   if (label) h('span', 'ed-lab', r, label);
-  const i = h('input', 'ed-num', r); i.type = 'number'; i.min = min; i.max = max; i.step = step; i.value = value; i.style.width = width + 'px';
+  const i = h('input', 'ed-num', r); if (ariaLabel || !label) i.setAttribute('aria-label', ariaLabel || 'Value'); i.type = 'number'; i.min = min; i.max = max; i.step = step; i.value = value; i.style.width = width + 'px';
   i.onchange = () => { let v = Math.max(min, Math.min(max, +i.value)); i.value = v; onChange && onChange(v); };
   return { el: r, set(v) { i.value = v; } };
 }
@@ -91,11 +94,19 @@ export function number(parent, { label, min, max, step = 1, value, onChange, wid
 export function button(parent, label, onClick, title) { const b = h('button', 'ed-btn', parent, label); b.type = 'button'; if (title) b.title = title; b.onclick = onClick; return b; }
 
 /** A canvas you draw yourself. draw(ctx, w, h) is called on redraw(). Pointer handlers optional. */
-export function canvas(parent, { width = 320, height = 120, draw, onPointer, label } = {}) {
+export function canvas(parent, { width = 320, height = 120, draw, onPointer, onKey, label, describe, ariaLabel, keyHint, role } = {}) {
   const wrap = h('div', 'ed-canvas', parent);
   if (label) h('div', 'ed-lab', wrap, label);
   const c = h('canvas', null, wrap); c.width = width; c.height = height;
   const ctx = c.getContext('2d');
+  if (onKey) {
+    c.tabIndex = 0; c.setAttribute('role', role || 'application');
+    const name = ariaLabel || label || 'Drawing', hint = keyHint == null ? 'left and right arrows pick a step, up and down change it' : keyHint;
+    c.setAttribute('aria-label', hint ? `${name}: ${hint}` : name);
+    const live = h('span', 'sr-only', wrap); live.setAttribute('aria-live', 'polite');
+    c.addEventListener('keydown', (e) => { const msg = onKey(e.key, e); if (msg != null) { e.preventDefault(); e.stopPropagation(); live.textContent = msg; redraw(); } });
+    c.addEventListener('focus', () => redraw()); c.addEventListener('blur', () => redraw());
+  } else { c.setAttribute('role', 'img'); c.setAttribute('aria-label', describe || ariaLabel || label || 'Graph'); }
   const redraw = () => { ctx.clearRect(0, 0, c.width, c.height); draw && draw(ctx, c.width, c.height); };
   if (onPointer) {
     let down = false;
@@ -117,9 +128,17 @@ const GRID = '#0a3a0a', FG = '#4cff6a', DIM = '#1b6b2a', BG = '#000';
  */
 export function wave(parent, { label = 'Waveform', length = 32, max = 15, values, onChange, width = 384, height = 128 }) {
   const box = h('div', 'ed-wave', parent);
-  let last = -1;
+  let last = -1, cur = 0;
   const cv = canvas(box, {
     width, height, label,
+    onKey: (k) => {
+      if (k === 'ArrowLeft') cur = (cur + length - 1) % length;
+      else if (k === 'ArrowRight') cur = (cur + 1) % length;
+      else if (k === 'ArrowUp' || k === 'ArrowDown') { values[cur] = Math.max(0, Math.min(max, values[cur] + (k === 'ArrowUp' ? 1 : -1))); onChange && onChange(values); }
+      else if (k === 'Home') cur = 0; else if (k === 'End') cur = length - 1;
+      else return null;
+      return `step ${cur + 1} of ${length}: ${values[cur]}`;
+    },
     draw: (g, w, hh) => {
       g.fillStyle = BG; g.fillRect(0, 0, w, hh);
       g.strokeStyle = GRID; g.lineWidth = 1;
@@ -130,6 +149,7 @@ export function wave(parent, { label = 'Waveform', length = 32, max = 15, values
         g.fillStyle = DIM; g.fillRect(i * bw + 1, y, bw - 2, hh - y);
         g.fillStyle = FG; g.fillRect(i * bw + 1, y, bw - 2, Math.max(2, hh / (max + 1) * 0.35));
       }
+      if (document.activeElement === g.canvas) { g.strokeStyle = '#f2c63a'; g.lineWidth = 2; g.strokeRect(cur * bw + 1, 1, bw - 2, hh - 2); }
     },
     onPointer: (kind, x, y) => {
       if (kind === 'up') { last = -1; onChange && onChange(values); return; }
@@ -162,8 +182,19 @@ export function macro(parent, { label, m, min = 0, max = 15, maxLength = 64, onC
   const box = h('div', 'ed-macro', parent);
   const span = max - min;
   const z = zero == null ? (min < 0 ? 0 : min) : zero;
+  let cur = 0;
   const cv = canvas(box, {
     width, height, label: label + ' (frames)',
+    onKey: (k) => {
+      const n = m.values.length; if (!n) return null;
+      cur = Math.min(cur, n - 1);
+      if (k === 'ArrowLeft') cur = (cur + n - 1) % n;
+      else if (k === 'ArrowRight') cur = (cur + 1) % n;
+      else if (k === 'ArrowUp' || k === 'ArrowDown') { m.values[cur] = Math.max(min, Math.min(max, m.values[cur] + (k === 'ArrowUp' ? 1 : -1))); onChange && onChange(m); }
+      else if (k === 'Home') cur = 0; else if (k === 'End') cur = n - 1;
+      else return null;
+      return `frame ${cur + 1} of ${n}: ${fmt(m.values[cur])}`;
+    },
     draw: (g, w, hh) => {
       g.fillStyle = BG; g.fillRect(0, 0, w, hh);
       const n = maxLength, bw = w / n;
@@ -178,6 +209,7 @@ export function macro(parent, { label, m, min = 0, max = 15, maxLength = 64, onC
       g.fillStyle = '#333'; g.fillRect(m.values.length * bw, 0, w - m.values.length * bw, hh);
       if (m.loop >= 0) { g.fillStyle = '#f2c63a'; g.fillRect(m.loop * bw, 0, 2, hh); }
       if (m.release >= 0) { g.fillStyle = '#e2463b'; g.fillRect(m.release * bw, 0, 2, hh); }
+      if (document.activeElement === g.canvas && m.values.length) { g.strokeStyle = '#7fb2ff'; g.lineWidth = 2; g.strokeRect(Math.min(cur, m.values.length - 1) * bw + 1, 1, bw - 2, hh - 2); }
     },
     onPointer: (kind, x, y) => {
       if (kind === 'up') { onChange && onChange(m); return; }
