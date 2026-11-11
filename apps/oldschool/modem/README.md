@@ -24,6 +24,9 @@ m.unmount();
 | `at.js` | AT command interpreter (pure logic) |
 | `models.js` | model presets (invented brands), regions, the dialing directory |
 | `bbs.js` | the scripted BBS / ISP / caller. Its text is really modulated onto the line by the far modem. |
+| `notes-core.js` | Secret Notes modem: framing, FEC, synthesis, streaming decoder (pure JS, runs in Node) |
+| `notes-crypto.js` | Secret Notes payload: deflate + PBKDF2 → AES-256-GCM (WebCrypto) |
+| `notes-ui.js` | the Secret Notes panel (send, save as .wav, listen through the mic, decode a sound file) |
 
 ## How it works
 
@@ -141,3 +144,107 @@ codes (`CONNECT 115200`, `CONNECT 33600/ARQ`, `CARRIER/PROTOCOL/COMPRESSION` lin
 * `node tests/modem-browser.mjs`: the standalone page in headless Chrome through the real worklet.
   Sessions at 300 / 2400 / V.32bis / V.34 / V.90 / busy, ERROR, numeric codes, an incoming call, hang-up
   latency, unmount. Screenshots go to `/tmp/rs/modem.png`.
+
+
+## Secret Notes (real data over the air)
+
+One Modem plays a note; another Modem listens through its microphone and decodes it. Notes can also be saved
+as a `.wav` file, sent by text or email, and decoded with "Decode a sound file…". Note audio is clean and does
+not go through the phone-line simulation. Every tone sits between 900 Hz and 3.3 kHz, where phone speakers and
+microphones work well, and plays at −6 dBFS peak times the panel's volume.
+
+### Speeds (measured, see below)
+
+| speed | modulation | gross | net (after FEC) | 100-char secret note* | 90 % success down to |
+|---|---|---|---|---|---|
+| **Sturdy** | MFSK-8, 75 baud, 2 interleaved banks of 8 tones | 225 bit/s | 112.5 bit/s = 14 B/s | 11.7 s | **−6 dB** SNR |
+| **Quick** | MFSK-8, 150 baud, same tone plan | 450 bit/s | 225 bit/s = 28 B/s | 6.1 s | **0 dB** |
+| **Classic** | 300 baud binary FSK, mark/space pair hopping over 4 pairs | 300 bit/s | 150 bit/s = 19 B/s | 8.9 s | **6 dB** |
+
+\* 145 bytes before compression (100 bytes of text + 45 bytes of crypto). English text usually deflates by 20–40 %.
+The optional fake handshake intro adds 1.75 s.
+
+* **Why 300 baud FSK isn't the sturdy one.** Measurements showed binary FSK is the *least* robust of the three
+  through a room. Its 3.3 ms symbols are shorter than a room's early echoes (2–20 ms), and a binary decision
+  has little noise margin. Long MFSK symbols with several bits each do better on both counts, so "Sturdy" is
+  75-baud MFSK-8. Classic is kept because it sounds like a modem.
+* **Two interleaved banks.** Consecutive symbols alternate between the even and odd tones of a 150 Hz grid,
+  so the echo of the previous symbol lands in the other bank. Classic's pair hopping does the same job. In
+  tests, banked MFSK-8 beat plain MFSK-16 (same tones and baud) at every SNR.
+
+### Frame
+
+`preamble` (two tones alternating, 0.5 s) → `sync` (8 tones for Sturdy/Quick; 24 bits with peak sidelobe 4 for
+Classic) → `header` (version · speed · flags · 16-bit length · CRC-8; FEC-coded) → `payload + CRC-32`
+(FEC-coded, interleaved) → 4 tail symbols.
+
+* **Receiver.** All three speeds are decoded in parallel at 9600 Hz with sliding-DFT tone energies.
+  * Acquisition uses energy ratios only: the two preamble tones must hold most of the band's energy, both
+    must be present, and they must alternate. That makes it level-independent; tests cover −45 dB.
+  * Timing is a block tracker. Every 16–24 symbols it picks the offset that maximises each symbol's strongest
+    tone, then nudges the symbol period. A ±0.8 % clock mismatch is followed; the spec asked for ±0.5 %.
+  * The sync word is peak-picked. The header is then tried at the sync peak and ±2 symbols, keeping the one
+    that passes CRC-8, version and speed checks. This matters because echoes blur the sync peak.
+* **FEC.** A rate-½ K=7 convolutional code (171/133 octal, the NASA/Voyager code) with a soft-decision
+  Viterbi decoder, plus PRBS9 whitening and a block interleaver (24 columns for the payload).
+  * Every symbol yields soft values (tone-energy ratios). Soft Viterbi turns these into about 5 dB of gain,
+    which a hard-decision Reed-Solomon decoder would mostly leave unused.
+  * The interleaver spreads a clap or cough (tens of ms, every bit soft-zero) into isolated erasures the
+    Viterbi decoder corrects. A 50 ms clap is absorbed, and in one test 40 % of a payload buried 9.5 dB under
+    noise still decoded.
+  * It is also small and exact to implement in plain JS.
+  * The trade-off is rate ½. A frame that the FEC can't fix fails CRC-32 and is reported as garbled, never
+    as a wrong passphrase.
+
+### Crypto (WebCrypto only)
+
+* **Key:** PBKDF2-HMAC-SHA256(passphrase NFC, random 16-byte salt, 200 000 iterations) → 256-bit AES-GCM key.
+* **Packet:** `version(1) | salt(16) | iv(12, random) | ciphertext + 16-byte GCM tag`, so 45 bytes of
+  overhead.
+* **Authentication:** the GCM tag authenticates the note. The frame header's speed and flags are bound in as
+  additional data.
+* **Order:** text is deflated (if that helps) before encryption.
+* **Receiver results:**
+  * CRC-32 failure → "Couldn't read it — too garbled".
+  * CRC fine but GCM fails → "wrong passphrase".
+  * No passphrase entered → 🔒, text not shown; "Try passphrase again" re-decrypts the held note.
+* **Logging:** nothing logs passphrases or plaintext.
+* **Open notes** (no passphrase) are plain deflated UTF-8 that **anyone with a decoder can read**. The UI says
+  so and labels the Send button "Send open note (not secret)".
+
+### Measured robustness (`node tests/modem-notes.mjs`, 50 trials per condition)
+
+The channel is:
+
+* phone speaker band-pass (300 Hz – 7 kHz);
+* a synthetic room: direct path, 5 early reflections at 2–20 ms with amplitude 0.2–0.5, and an exponentially
+  decaying noise tail with RT60 0.3–0.6 s and DRR 2–10 dB;
+* clock skew ±0.5 %, random gain −35…0 dB, 0.2–2.5 s of leading and 0.3–1 s of trailing silence;
+* a clap about 20 dB above the signal mid-packet;
+* white noise, 100 Hz – 8 kHz, at the stated SNR (signal power over the packet ÷ noise power).
+
+| SNR | 20 | 12 | 6 | 3 | 0 | −3 | −6 | −9 dB |
+|---|---|---|---|---|---|---|---|---|
+| Sturdy | 98 % | 98 % | 98 % | 98 % | 100 % | 98 % | 92 % | 34 % |
+| Quick | 98 % | 96 % | 94 % | 92 % | 90 % | 74 % | 20 % | 0 % |
+| Classic | 94 % | 92 % | 92 % | 86 % | 76 % | 44 % | 4 % | 0 % |
+
+The 2–6 % failures at high SNR are draws with very strong early reflections. Further checks:
+
+* Separate 50-trial runs at 15 dB: ±0.5 % and ±0.8 % skew, RT60 0.6 s with DRR 2 dB, −45 dB level, and two
+  claps all stay between 92 % and 100 % for every speed.
+* No false notes from 60 s of noise, 60 s of random-tone babble, or the intro flourish.
+* Notes survive AAC 64 kbps, Opus 24 kbps (voip) and MP3 64 kbps transcodes, including room recordings.
+* `node tests/modem-notes-browser.mjs` drives Chrome's fake microphone with a room-simulated recording. It
+  covers the right, wrong and missing passphrase; keep-listening; Save as sound → Decode a sound file (WAV,
+  m4a, ogg, mp3); and axe (0 violations).
+
+### Caveats
+
+* The microphone and WebCrypto need a secure context (https or localhost). An embedding iframe needs
+  `allow="microphone"`.
+* The mic is requested with echoCancellation, noiseSuppression and autoGainControl all off. Some browsers
+  (notably iOS Safari) may still apply voice processing, and on iPhone an open mic can route playback to the
+  earpiece or lower it. Sending and listening work best on two devices.
+* Ogg/Opus files need a browser that decodes them: older Safari doesn't. Messaging apps that re-encode voice
+  with narrowband speech codecs (AMR) were not tested.

@@ -286,6 +286,14 @@ const EXTRAS = ({
         <li><b>Line quality</b> adds noise, which can push the modems down to slower speeds.</li>
         <li>Up/Down in the command box recalls earlier commands.</li>
       </ul>
+      <h3>Secret notes: send a message by sound</h3>
+      <p>The Modem can really send data through the air, from one device's speaker to another device's microphone, the way acoustic couplers did in the '70s.</p>
+      <ol>
+        <li>Both people open the Modem's <b>Secret Notes</b> and agree on a <b>passphrase</b> (say it in person, not over the same channel).</li>
+        <li>The receiver presses <b>Listen</b> and allows the microphone.</li>
+        <li>The sender types a note, enters the passphrase, holds the phone near the other device and presses <b>Send</b>.</li>
+      </ol>
+      <p>The note is encrypted before it becomes sound (AES-256 with a key made from the passphrase). Anyone can record the screech, but without the passphrase it's noise. A note sent without a passphrase is an <b>open note</b>: anyone with a decoder can read it. Hold the devices within a foot or two of each other; across a room, echoes can garble a note. <b>Sturdy</b> is the safest, <b>Quick</b> takes half the time but needs a quieter room, and <b>Classic</b> sounds most like a real modem. If a note doesn't arrive, just send it again: the listener keeps listening. <b>Save as sound</b> makes an audio file you can text someone; they use <b>Decode a sound file</b>.</p>
       <p class="fine">Brand names here are invented; the protocols (Bell 103, V.21, V.22bis, V.32bis, V.34, V.90…) are the real standards.</p>`],
     plate: { bg: 'linear-gradient(#e4ded0, #c9c1ae)', fg: '#2a2a2a', stripe: 'repeating-linear-gradient(90deg, #e2463b 0 10px, #222 10px 14px, #3aa84f 14px 24px, #222 24px 28px, #f2c63a 28px 38px, #222 38px 42px)', chip: 'AT · V.34' },
   }],

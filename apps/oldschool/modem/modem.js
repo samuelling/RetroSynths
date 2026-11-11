@@ -3,6 +3,7 @@
 import { ATModem, lookupNumber, farPlan, modemPlan } from './at.js';
 import { MODELS, SERVERS, PHONEBOOK, REGIONS, ANSWER_KINDS, PROTO_NAME, modelById } from './models.js';
 import { farSession } from './bbs.js';
+import { mountNotes } from './notes-ui.js';
 
 const WORKLET_URL = new URL('./worklet.js', import.meta.url);
 const loaded = new WeakMap();              // AudioContext -> Promise (addModule once per context)
@@ -98,7 +99,8 @@ export function mountModem(container, { ctx, destination, setStatus = () => {} }
     h('div', { class: 'md-specwrap' }, spec, h('div', { class: 'md-axis', 'aria-hidden': 'true' }, h('span', { text: '4k' }), h('span', { text: '3k' }), h('span', { text: '2k' }), h('span', { text: '1k' }), h('span', { text: '0' }))),
     lanes, nowBox, live, h('details', { class: 'md-details' }, h('summary', { text: 'Handshake log' }), logList));
 
-  const wrap = h('div', { class: 'md-wrap' }, modelBox, termBox, scopeBox, bookBox, lineBox);
+  const notesHost = h('div', { class: 'md-noteshost' });
+  const wrap = h('div', { class: 'md-wrap' }, modelBox, termBox, scopeBox, bookBox, lineBox, notesHost);
   container.append(wrap);
   const stopKeys = (e) => e.stopPropagation();
   container.addEventListener('keydown', stopKeys); container.addEventListener('keyup', stopKeys);
@@ -280,6 +282,14 @@ export function mountModem(container, { ctx, destination, setStatus = () => {} }
     }
   }
   function clearScope() { sctx.fillStyle = '#000'; sctx.fillRect(0, 0, W, SH); segs.length = 0; }
+  // the spectrogram normally shows the phone line; Secret Notes can borrow it for the microphone or a note being sent
+  let specSource = 'line', specLabel = '';
+  const SPEC_LINE = spec.getAttribute('aria-label');
+  const spectro = {
+    use(src, label) { specSource = src === 'notes' ? 'notes' : 'line'; specLabel = label || '';
+      spec.setAttribute('aria-label', specSource === 'line' ? SPEC_LINE : `Spectrogram of the ${specLabel}: frequency 0 to 4 kHz upward, time scrolling to the left`); },
+    feed(d) { if (specSource === 'notes') pushLine(d); },
+  };
   const PHC = {};
   const phaseColor = (p = '') => { if (!PHC[p]) { let x = 0; for (const c of p) x = (x * 31 + c.charCodeAt(0)) >>> 0; PHC[p] = `hsl(${x % 360} 55% 62%)`; } return PHC[p]; };
   function draw() {
@@ -293,6 +303,11 @@ export function mountModem(container, { ctx, destination, setStatus = () => {} }
     }
     // lanes, aligned with the spectrogram's time axis
     lctx.fillStyle = '#c0c0c0'; lctx.fillRect(0, 0, W, LH);
+    if (specSource === 'notes') {
+      lctx.fillStyle = '#000080'; lctx.fillRect(0, 2, W, LH - 4); lctx.fillStyle = '#fff'; lctx.font = '12px "Lucida Console", monospace'; lctx.textBaseline = 'middle';
+      lctx.fillText('SECRET NOTES · spectrogram shows the ' + specLabel, 8, LH / 2);
+      updateNow(); raf = requestAnimationFrame(draw); return;
+    }
     const lane = { local: 0, remote: 1, net: 2 }, lh = LH / 3;
     lctx.font = '10px "Lucida Console", monospace'; lctx.textBaseline = 'middle';
     for (const side of ['local', 'remote', 'net']) {
@@ -333,7 +348,7 @@ export function mountModem(container, { ctx, destination, setStatus = () => {} }
     out = ctx.createGain(); out.gain.value = 1; node.connect(out); out.connect(dest);
     node.port.onmessage = (ev) => {
       const d = ev.data;
-      if (d.type === 'line') { tNow = (d.t0 + d.data.length) / 8000; pushLine(d.data); if (tap.on) { if (!tap.line.length) tap.t0 = d.t0 / 8000; tap.line.push(d.data); if (d.spk) tap.spk.push(d.spk); } }
+      if (d.type === 'line') { tNow = (d.t0 + d.data.length) / 8000; if (specSource === 'line') pushLine(d.data); if (tap.on) { if (!tap.line.length) tap.t0 = d.t0 / 8000; tap.line.push(d.data); if (d.spk) tap.spk.push(d.spk); } }
       else if (d.type === 'events') for (const e of d.list) onEvent(e);
       else if (d.type === 'debug') { const f = debugWait.shift(); if (f) f(d); }
       else if (d.type === 'error') { console.error('[modem worklet]', d.message); termLine('(modem engine error: ' + d.message.split('\n')[0] + ')', 'note'); at.onEngine({ kind: 'result', code: 'NO CARRIER' }); }
@@ -341,6 +356,7 @@ export function mountModem(container, { ctx, destination, setStatus = () => {} }
     node.onprocessorerror = () => termLine('(the modem audio engine stopped)', 'note');
     for (const m of queue) node.port.postMessage(m); queue = [];
   }).catch((err) => { termLine('Audio worklet failed to load: ' + err.message, 'note'); });
+  const notes = mountNotes(notesHost, { ctx, dest, ready, spectro, setStatus });
 
   renderModel(); onState({ mode: 'command', offhook: false, carrier: false, aa: false, conn: null });
   termLine('RetroSynths MODEM — type AT commands, or pick a model and a number from the directory.', 'note');
@@ -350,6 +366,7 @@ export function mountModem(container, { ctx, destination, setStatus = () => {} }
   return {
     unmount() {
       dead = true; cancelAnimationFrame(raf); for (const t of timers) clearTimeout(t); timers.clear();
+      try { notes.unmount(); } catch (e) {}
       container.removeEventListener('keydown', stopKeys); container.removeEventListener('keyup', stopKeys);
       if (node) { try { node.port.postMessage({ type: 'hangup', quiet: true }); node.port.postMessage({ type: 'dispose' }); node.port.onmessage = null; node.disconnect(); } catch (e) {} }
       if (out) { try { out.disconnect(); } catch (e) {} }
@@ -359,7 +376,7 @@ export function mountModem(container, { ctx, destination, setStatus = () => {} }
     command(s) { submit(s); },
     /** testing hooks: capture the 8 kHz line and speaker signals, inspect events */
     _test: { tap(on) { tap.on = on; post({ type: 'tap', on }); if (on) { tap.line = []; tap.spk = []; } return tap; }, events: evLog, at: () => at, ring: (i) => ringFrom(i), pick: (m) => pickModel(m),
-      debug: () => new Promise((res) => { debugWait.push(res); post({ type: 'debug' }); }) },
+      debug: () => new Promise((res) => { debugWait.push(res); post({ type: 'debug' }); }), notes: () => notes._test },
   };
 }
 export default mountModem;

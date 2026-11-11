@@ -213,7 +213,7 @@ function openApp(key) {
   } else {
     const f = document.createElement('iframe');
     f.src = A.src; f.title = A.title;
-    f.allow = 'autoplay; midi; fullscreen; clipboard-write';
+    f.allow = 'autoplay; midi; fullscreen; clipboard-write; microphone';
     f.addEventListener('load', () => { if (win.classList.contains('active') && !menuOpener) f.focus(); });
     win.appendChild(f);
   }
