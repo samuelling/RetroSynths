@@ -8,7 +8,7 @@ A make-believe early-'90s desktop of retro sound chips that you play with Genera
 |---|---|
 | **Blasta** | PC sound cards, 1989–1998. AdLib / SB 2.0 and Sound Blaster 16 use cycle-accurate OPL emulation (a Nuked OPL3 port, bit-exact). AWE32 and SB Live! use GeneralUser GS burned into period ROM shapes. You can slide between eras, and the Bank Locker holds your own SoundFonts. |
 | **Console** | NES (2A03), Super Nintendo (SPC700 + S-DSP), Genesis / Mega Drive (YM2612 + SN76489), TurboGrafx-16 (HuC6280), Game Boy (DMG APU). |
-| **Old School** | Apple IIe + Mockingboard (2× AY-3-8910 + speaker), Commodore 64 (SID), Atari 2600 (TIA), Atari 800 (POKEY), ZX Spectrum 128 (AY), MSX (YM2149), IBM PC speaker (8253 PIT). |
+| **Old School** | Apple IIe + Mockingboard (2× AY-3-8910 + speaker), Commodore 64 (SID), Atari 2600 (TIA), Atari 800 (POKEY), ZX Spectrum 128 (AY), MSX (YM2149), IBM PC speaker (8253 PIT), plus the **Modem**: a dial-up modem and phone line you drive with AT commands, synthesizing both ends of every handshake from Bell 103 to V.90 (see `apps/oldschool/modem/README.md`). |
 
 Each machine runs an emulation of its own sound chip at the chip's native clock, with native bit depths, and is played through its **own** instruments:
 

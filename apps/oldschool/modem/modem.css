@@ -1,0 +1,75 @@
+/* RetroSynths Modem — scoped under .modem; builds on common/app.css (fieldset.group, .btn, .lcd, .plate, .mpick) */
+.modem .md-wrap { display: grid; gap: 8px; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
+.modem .md-model { grid-column: 1 / -1; }
+.modem .md-book { grid-column: 1 / 2; }
+.modem :focus-visible { outline: 1px dotted #000; outline-offset: 1px; }
+.modem .md-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* model plate + LEDs */
+.modem .md-plate { width: 230px; height: 96px; }
+.modem .md-plate .p-name { font-size: 18px; max-width: 150px; }
+.modem .md-leds { display: grid; grid-template-columns: repeat(4, auto); gap: 3px 8px; padding: 6px 8px; background: #1a1a1a; border-radius: 3px;
+  box-shadow: inset 1px 1px #000, inset -1px -1px #444; align-self: center; }
+.modem .md-led { display: inline-flex; align-items: center; gap: 4px; color: #c8c8c8; font: 10px "Lucida Console", monospace; }
+.modem .md-led i { width: 8px; height: 8px; border-radius: 50%; background: #3a0d0d; box-shadow: inset 0 0 1px #000; }
+.modem .md-led.on i { background: #ff3a2a; box-shadow: 0 0 4px #ff5a3a, inset 0 0 1px #800; }
+.modem .md-presets { grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); }
+.modem .md-presets button { text-align: left; }
+.modem .md-presets button[aria-pressed="true"] { box-shadow: inset 1px 1px var(--lo), inset -1px -1px var(--hi); background: #d8d8d8; font-weight: bold; }
+
+/* terminal */
+.modem .md-screen { display: block; height: 300px; overflow-y: auto; padding: 6px 8px; white-space: pre-wrap; word-break: break-all;
+  font: 13px/1.25 "Perfect DOS VGA 437", "Lucida Console", "Courier New", monospace; }
+.modem .md-screen .md-l { min-height: 1.25em; }
+.modem .md-screen .res { color: #b8ffc4; font-weight: bold; }
+.modem .md-screen .note { color: #2fa846; }
+.modem .md-screen .info { color: var(--lcdfg); }
+.modem .md-screen .rx { color: #e8f8a0; }
+.modem .md-screen:focus-visible { outline: 1px dotted #000; outline-offset: 2px; }
+.modem .md-cmdrow { flex-wrap: nowrap; }
+.modem .md-cmd { flex: 1; min-width: 0; background: var(--lcd); color: var(--lcdfg); border: 1px solid var(--dk); box-shadow: inset 1px 1px var(--lo);
+  font: 13px "Lucida Console", "Courier New", monospace; padding: 3px 5px; caret-color: var(--lcdfg); text-transform: none; }
+.modem .md-hint { color: #404040; font-size: 11px; }
+.modem.md-online .md-cmd { border-color: #0a5; }
+
+/* line monitor */
+.modem .md-specwrap { position: relative; }
+.modem .md-spec, .modem .md-lanes { display: block; width: 100%; image-rendering: pixelated; box-shadow: inset 1px 1px var(--lo); }
+.modem .md-spec { height: 160px; background: #000; }
+.modem .md-lanes { height: 72px; margin-top: 2px; }
+.modem .md-axis { position: absolute; left: 3px; top: 0; bottom: 0; display: flex; flex-direction: column; justify-content: space-between; pointer-events: none;
+  font: 9px "Lucida Console", monospace; color: #9fe; text-shadow: 0 0 2px #000; padding: 1px 0; }
+.modem .md-now { margin-top: 4px; font: 11px/1.35 "Lucida Console", monospace; background: #fff; padding: 3px 6px; min-height: 4.2em;
+  box-shadow: inset 1px 1px var(--lo), inset -1px -1px var(--hi); }
+.modem .md-now div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.modem .md-details { margin-top: 4px; }
+.modem .md-details summary { cursor: pointer; }
+.modem .md-log { max-height: 180px; overflow: auto; margin: 4px 0 0; padding: 3px 6px 3px 2.6em; background: #fff; font: 11px "Lucida Console", monospace;
+  box-shadow: inset 1px 1px var(--lo), inset -1px -1px var(--hi); }
+.modem .md-log .md-t { color: #606060; }
+
+/* directory */
+.modem .md-booktable { max-height: 330px; overflow: auto; background: #fff; box-shadow: inset 1px 1px var(--lo), inset -1px -1px var(--hi); }
+.modem .md-book table { border-collapse: collapse; width: 100%; }
+.modem .md-book th, .modem .md-book td { padding: 2px 5px; text-align: left; vertical-align: middle; }
+.modem .md-book thead th { position: sticky; top: 0; background: var(--face); border-bottom: 1px solid var(--lo); }
+.modem .md-book tbody tr:nth-child(even) { background: #f0f0f0; }
+.modem .md-book tbody th { font-weight: bold; white-space: nowrap; }
+.modem .md-book tbody th small { font-weight: normal; color: #505050; }
+.modem .md-book select { max-width: 190px; }
+.modem .md-num { font-family: "Lucida Console", monospace; white-space: nowrap; }
+.modem .md-bk { white-space: nowrap; }
+.modem .md-bk .btn + .btn { margin-left: 3px; }
+
+/* line & speaker */
+.modem .md-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; align-items: center; }
+.modem .md-grid input[type=range] { accent-color: var(--title); width: 100%; min-width: 80px; }
+.modem .md-inline { display: flex; align-items: center; gap: 6px; }
+.modem .md-qout { font-family: "Lucida Console", monospace; min-width: 6em; }
+
+@media (max-width: 760px) {
+  .modem .md-wrap { grid-template-columns: 1fr; }
+  .modem .md-book { grid-column: auto; }
+  .modem .md-leds { grid-template-columns: repeat(4, auto); }
+  .modem .md-plate { width: 140px; }
+}

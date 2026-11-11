@@ -27,6 +27,7 @@ const app = {
   midiMute: new Uint8Array(16), voiceMute: 0, vmuteSet: new Set(), voiceSolo: -1, octave: 4,
   programs: new Array(16).fill(0), drums: new Array(16).fill(false),
 };
+const startId = app.id;                          // may name a non-MIDI extra (Old School: modem)
 if (!IDS.includes(app.id)) app.id = IDS[0];
 const M = () => MACHINES[app.id];
 const presetsOf = (id) => MACHINES[id].presets || [];
@@ -264,6 +265,31 @@ function renderMachine() {
   document.querySelectorAll('.mpick button').forEach(b => b.classList.toggle('on', b.dataset.id === app.id));
   if (EXT && EXT.renderMachine) EXT.renderMachine(app.id);
 }
+// ------------------------------------------------------------ extras: instruments that aren't MIDI machines (Old School: Modem)
+const EXTRAS = ({
+  oldschool: [{
+    id: 'modem', name: 'Modem', maker: 'Dial-up', year: '1962–1999', chip: 'Phone line + two modems · Bell 103 → V.90',
+    spec: 'Type AT commands and dial out: dial tone, touch-tone or pulse clicks, ringing, then both modems\' handshake — every tone generated from the protocol specs.',
+    module: '../apps/oldschool/modem/modem.js', css: '../apps/oldschool/modem/modem.css',
+    help: ['modem', 'The Modem', `
+      <p>The Modem isn't played with the piano. It's a dial-up modem and phone line: type commands, dial a number and listen to two modems negotiate. Every tone is generated from the actual protocol specs.</p>
+      <ol>
+        <li><b>Pick a modem</b> from the row of models, from a 1978 acoustic coupler to a 1998 56K. Its setup string is typed for you.</li>
+        <li><b>Dial</b> someone in the <b>Dialing Directory</b> with <b>Dial</b>, or type <code>ATDT555-0142</code> and press Enter. That's the MEGAzine BBS.</li>
+        <li>Listen: dial tone, touch-tones, ringing, then the answer tone and the handshake. The <b>Line Monitor</b> shows it as a spectrogram, with a timeline of what each side is sending.</li>
+        <li><b>Hang up</b> (or type <code>ATH</code>) to stop.</li>
+      </ol>
+      <ul>
+        <li><b>Answers with</b> chooses what's on the other end of each number: another modem, a busy signal, a fax machine, a person, or nobody.</li>
+        <li><b>Ring me</b> makes that number call <i>you</i>; type <code>ATA</code> to answer, and you hear it from the answering end.</li>
+        <li>Classic commands work: <code>ATDP</code> pulse dialing, <code>ATM2</code> keeps the speaker on after connecting, <code>ATL3</code> louder, <code>ATX0</code>, <code>AT&amp;V</code>, <code>ATI</code>, <code>+++</code> and many more. Unknown ones answer ERROR, like the real thing.</li>
+        <li><b>Line quality</b> adds noise, which can push the modems down to slower speeds.</li>
+        <li>Up/Down in the command box recalls earlier commands.</li>
+      </ul>
+      <p class="fine">Brand names here are invented; the protocols (Bell 103, V.21, V.22bis, V.32bis, V.34, V.90…) are the real standards.</p>`],
+    plate: { bg: 'linear-gradient(#e4ded0, #c9c1ae)', fg: '#2a2a2a', stripe: 'repeating-linear-gradient(90deg, #e2463b 0 10px, #222 10px 14px, #3aa84f 14px 24px, #222 24px 28px, #f2c63a 28px 38px, #222 38px 42px)', chip: 'AT · V.34' },
+  }],
+})[GROUP] || [];
 (function buildPicker() {
   const box = $('mpick');
   for (const id of IDS) {
@@ -271,10 +297,60 @@ function renderMachine() {
     b.dataset.id = id;
     b.innerHTML = `<span></span><br><small>${info.year}</small>`;
     b.querySelector('span').textContent = info.name.replace(' / Mega Drive', '').replace(' + Mockingboard', '');
-    b.onclick = () => selectMachine(id);
+    b.onclick = () => { if (extra) leaveExtra(); selectMachine(id); };
+    box.appendChild(b);
+  }
+  for (const x of EXTRAS) {
+    const b = document.createElement('button');
+    b.dataset.id = x.id; b.className = 'extra-pick';
+    b.innerHTML = `<span></span><br><small></small>`;
+    b.querySelector('span').textContent = x.name; b.querySelector('small').textContent = x.year;
+    b.onclick = () => enterExtra(x);
     box.appendChild(b);
   }
 })();
+
+// ------------------------------------------------------------ extras: instruments that aren't MIDI machines (Old School: Modem)
+let extra = null;                                // { x, handle }
+async function enterExtra(x) {
+  if (extra && extra.x === x) return;
+  if (extra) leaveExtra();
+  player.stop(); post({ t: 'reset' });
+  for (const n of [...held.keys()]) liveOff(n);
+  extra = { x, handle: null };
+  document.body.classList.add('extra-mode');
+  try { localStorage.setItem('retrosynths.' + GROUP + '.machine', x.id); } catch {}
+  document.querySelectorAll('.mpick button').forEach(b => b.classList.toggle('on', b.dataset.id === x.id));
+  const pl = x.plate, plate = $('plate');
+  plate.style.background = pl.bg; plate.style.color = pl.fg;
+  plate.innerHTML = `<div class="p-maker"></div><div class="p-name"></div><div class="p-chip"></div><div class="p-stripe"></div><div class="p-year"></div>`;
+  plate.querySelector('.p-maker').textContent = x.maker.toUpperCase();
+  plate.querySelector('.p-name').textContent = x.name;
+  plate.querySelector('.p-chip').textContent = pl.chip;
+  plate.querySelector('.p-stripe').style.background = pl.stripe;
+  plate.querySelector('.p-year').textContent = x.year;
+  $('mName').textContent = x.name; $('mChip').textContent = x.chip; $('mSpec').textContent = x.spec; $('mopts').innerHTML = '';
+  if (x.css && !document.querySelector(`link[data-extra="${x.id}"]`)) {
+    const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = new URL(x.css, import.meta.url).href; l.dataset.extra = x.id; document.head.appendChild(l);
+  }
+  const fs = document.createElement('section'); fs.className = 'extrabox'; fs.id = 'extraPanel'; fs.setAttribute('aria-label', x.name);
+  fs.innerHTML = '<div id="extraMount"></div>';
+  document.querySelector('fieldset.machine').after(fs);
+  try {
+    if (!ctx) await initAudio();
+    const mod = await import(new URL(x.module, import.meta.url).href);
+    if (!extra || extra.x !== x) return;
+    extra.handle = await mod.mountModem($('extraMount'), { ctx, destination: ctx.destination, setStatus });
+    setStatus(`${x.name} ready. Type a command, or pick a number from the phonebook.`);
+  } catch (err) { console.error(err); setStatus(`${x.name}: ${err.message}`); }
+}
+function leaveExtra() {
+  if (!extra) return;
+  try { extra.handle && extra.handle.unmount(); } catch (err) { console.error(err); }
+  extra = null;
+  const fs = $('extraPanel'); if (fs) fs.remove();
+  document.body.classList.remove('extra-mode');
+}
 
 // ------------------------------------------------------------ Voices panel (chip channels)
 let vRows = [];
@@ -614,7 +690,7 @@ $('aboutOK').onclick = () => { $('about').hidden = true; };
 wireDialogs();
 // buttons that open a hidden file input (keyboard-reachable, unlike a bare <label for>)
 document.querySelectorAll('[data-file]').forEach(b => b.addEventListener('click', () => $(b.dataset.file).click()));
-const helpCtx = () => ({ GROUP, APP_NAME, IDS, MACHINES, current: app.id, extra: EXT && EXT.helpTopics ? EXT.helpTopics() : [] });
+const helpCtx = () => ({ GROUP, APP_NAME, IDS, MACHINES, current: app.id, extra: [...EXTRAS.map(x => x.help).filter(Boolean), ...(EXT && EXT.helpTopics ? EXT.helpTopics() : [])] });
 window.addEventListener('keydown', (e) => { if (e.key === 'F1') { e.preventDefault(); openHelp(helpCtx()); } });
 $('fileMidi').onchange = async (e) => { const f = e.target.files[0]; if (f) await openMidi(f); e.target.value = ''; };
 async function openMidi(file) {
@@ -726,6 +802,7 @@ const typingTarget = (t) => t && (t.tagName === 'SELECT' || t.tagName === 'TEXTA
 window.addEventListener('keydown', (e) => {
   if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
   if ([...document.querySelectorAll('.dialog')].some(d => !d.hidden)) return;      // dialogs own the keyboard
+  if (extra) return;                                                                 // the modem has its own keyboard
   const t = e.target; if (typingTarget(t)) return;
   const k = e.key.toLowerCase();
   if (k === 'z') { setOctave(app.octave - 1); return; }
@@ -767,4 +844,5 @@ export const API = {
 // initial paint (before power-on)
 if (EXT_URL) { try { EXT = await import(new URL(EXT_URL, document.baseURI).href); if (EXT.init) await EXT.init(API); } catch (err) { console.error(err); setStatus('Extension error: ' + err.message); } }
 loadState(); renderMachine(); buildVoices(); renderArranger(); renderInstList(); selectInst(S.sel, true);
+{ const x = EXTRAS.find(e => e.id === startId); if (x) enterExtra(x); }
 initAudio().catch(err => { console.error(err); setStatus('Audio error: ' + err.message); });

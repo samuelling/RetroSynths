@@ -335,3 +335,9 @@ button.vrow[aria-pressed=true] .vname { text-decoration: line-through; }
 }
 .plate .p-maker { right: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 760px) { .mtop { flex-wrap: wrap; } }
+
+/* ---------- extras (Old School: Modem) replace the MIDI panels ---------- */
+body.extra-mode .transport, body.extra-mode .scopebox, body.extra-mode .voices, body.extra-mode .arrangerbox,
+body.extra-mode .instruments, body.extra-mode #dock .keys, body.extra-mode #voices { display: none; }
+.extrabox { grid-column: 1 / -1; }
+.mpick button.extra-pick { border-style: dashed; }
