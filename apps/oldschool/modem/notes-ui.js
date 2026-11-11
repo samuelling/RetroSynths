@@ -70,7 +70,7 @@ export function mountNotes(host, { ctx, dest, ready, spectro, setStatus = () => 
     MODE_KEYS.map(k => { const m = MODES[k]; const net = m.baud * m.bps / 16;
       const desc = { sturdy: `slow & sure · MFSK-8, ${m.baud} baud · ~${net.toFixed(0)} bytes/s`, quick: `MFSK-8, ${m.baud} baud · ~${net.toFixed(0)} bytes/s`, classic: `the modem sound · FSK, ${m.baud} baud · ~${net.toFixed(0)} bytes/s` }[k];
       return h('label', { class: 'chk' }, h('input', { type: 'radio', name: id + '-speed', value: k, checked: k === 'sturdy', onchange: () => { updateCount(); updatePicInfo(); } }), ` ${m.name} `, h('small', { text: `(${desc})` })); }));
-  const intro = h('input', { type: 'checkbox', id: id + '-intro', onchange: () => { updateCount(); updatePicInfo(); } });
+  const intro = h('input', { type: 'checkbox', id: id + '-intro', checked: true, onchange: () => { updateCount(); updatePicInfo(); } });
   const btnSend = h('button', { type: 'button', class: 'btn', onclick: () => send() }, 'Send');
   const btnStop = h('button', { type: 'button', class: 'btn', disabled: true, onclick: () => stopPlaying() }, 'Stop');
   const btnSave = h('button', { type: 'button', class: 'btn', onclick: () => save() }, 'Save as sound (.wav)');
